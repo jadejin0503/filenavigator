@@ -1,8 +1,9 @@
 """
 PFN 图标模块：Ant Design 风格图标，14px，支持按类型/层级区分颜色。
 """
-from PyQt6.QtGui import QIcon, QPixmap, QPainter
-from PyQt6.QtCore import Qt
+import os
+from PyQt6.QtGui import QIcon, QPixmap, QPainter, QPainterPath
+from PyQt6.QtCore import Qt, QRectF
 
 try:
     from PyQt6.QtSvg import QSvgRenderer
@@ -19,7 +20,7 @@ _FOLDER_FILLED = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 10
 
 # 文件夹描边 (FolderOutlined) - 次要色
 _FOLDER_OUTLINED = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024" width="1024" height="1024">
-<path fill="none" stroke="{color}" stroke-width="64" d="M880 298.4H521L405.7 186.2c-5.8-4.9-13.8-7.8-22.2-7.8H144c-17.7 0-32 14.3-32 32v592c0 17.7 14.3 32 32 32h736c17.7 0 32-14.3 32-32V330.4c0-17.7-14.3-32-32-32z"/>
+<path fill="none" stroke="{color}" stroke-width="56" stroke-linejoin="round" stroke-linecap="round" d="M880 298.4H521L405.7 186.2c-5.8-4.9-13.8-7.8-22.2-7.8H144c-17.7 0-32 14.3-32 32v592c0 17.7 14.3 32 32 32h736c17.7 0 32-14.3 32-32V330.4c0-17.7-14.3-32-32-32z"/>
 </svg>'''
 
 # 文件 XML
@@ -47,10 +48,11 @@ _FILE_OUTLINED = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 10
 <path fill="{color}" d="M854.6 288.6L639.4 73.4c-6-6-14.1-9.4-22.6-9.4H192c-17.7 0-32 14.3-32 32v832c0 17.7 14.3 32 32 32h640c17.7 0 32-14.3 32-32V311.3c0-8.5-3.4-16.7-9.4-22.7zM400 402c0-4.4 3.6-8 8-8h208c4.4 0 8 3.6 8 8v48c0 4.4-3.6 8-8 8H408c-4.4 0-8-3.6-8-8v-48zm0 160v48c0 4.4 3.6 8 8 8h208c4.4 0 8-3.6 8-8v-48c0-4.4-3.6-8-8-8H408c-4.4 0-8 3.6-8 8zm416 224H208V148h216v168c0 17.7 14.3 32 32 32h168v250z"/>
 </svg>'''
 
-# HomeOutlined / SendOutlined / PushpinOutlined / 右侧黄色文件夹
+# HomeOutlined / SendOutlined / PushpinOutlined / BarsOutlined / 右侧黄色文件夹
 _HOME_OUTLINED = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><path fill="{color}" d="M946.5 505L560.1 118.8l-25.9-25.9a31.5 31.5 0 0 0-44.4 0L77.5 505a63.9 63.9 0 0 0-18.8 46c.4 35.2 29.7 63.6 65 63.6h42.5V940h691.8V614.6h42.5c35.3 0 64.6-28.3 65-63.6a63.9 63.9 0 0 0-18.8-46zM568 868H456V664h112v204zm217.9-325.7V868H632V640c0-22.1-17.9-40-40-40H432c-22.1 0-40 17.9-40 40v228H238.1V542.3h-96l370-369.7 23.1 23.1L882 542.3h-96.1z"/></svg>'''
 _SEND_OUTLINED = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><path fill="{color}" d="M931.4 498.9L94.9 79.5c-3.4-1.7-7.3-2.1-11-1.2a15.99 15.99 0 0 0-11.7 19.3l86.2 352.2c1.3 5.3 5.2 9.6 10.4 12.3l147.7 77.7 147.7 77.7c5.2 2.7 9.9 7.4 12.3 12.8l86.2 352.2c2.8 11.4 15.7 18.2 27.1 15.4 3.7-.9 7-2.9 9.4-5.8l173.4-192.3c3-3.3 4.9-7.6 4.9-12.2 0-4.7-1.9-9-4.9-12.2L931.4 498.9zM170.8 124.9l151.6 619.2-151.6-79.8V124.9zm693.4 361.5l-147.7-77.7-147.7-77.7-151.6 79.8 151.6 619.2 147.7-77.7 147.7-77.7 151.6-79.8-151.6-619.2z"/></svg>'''
 _PUSHPIN_OUTLINED = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><path fill="{color}" d="M878.3 392.1L631.9 145.7c-6.5-6.5-15-9.7-23.5-9.7s-17 3.2-23.5 9.7L423.8 306.9c-12.2-1.4-24.5-2-36.8-2-65.4 0-128.9 21.6-177.2 62.7-3.4 2.8-6.7 5.8-9.9 8.9-7.1 7.1-7.1 18.6 0 25.6l181 181 181 181c3.3 3.3 7.4 4.9 11.6 4.9 4.2 0 8.3-1.7 11.6-4.9 3.1-3.1 6.1-6.5 8.9-9.9 41.1-48.3 62.7-111.8 62.7-177.2 0-12.3-.6-24.6-2-36.8l161.2-161.2c12.9 12.9 12.9 33.8 0 46.8L565.2 878.3c-6.5 6.5-6.5 17 0 23.5 3.2 3.2 7.4 4.9 11.7 4.9s8.5-1.6 11.7-4.9l313.4-313.4c6.5-6.5 6.5-17 0-23.5l-24.2-24.2-313.4 313.4c-6.5 6.5-6.5 17 0 23.5 3.2 3.2 7.4 4.9 11.7 4.9s8.5-1.6 11.7-4.9l313.4-313.4c6.5-6.5 6.5-17 0-23.5L878.3 392.1z"/></svg>'''
+_BARS_OUTLINED = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><path fill="{color}" d="M160 256h704v64H160zm0 224h704v64H160zm0 224h704v64H160z"/></svg>'''
 _FOLDER_YELLOW = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><path fill="{color}" d="M880 298.4H521L405.7 186.2a8.15 8.15 0 0 0-5.5-2.2H144c-17.7 0-32 14.3-32 32v592c0 17.7 14.3 32 32 32h736c17.7 0 32-14.3 32-32V330.4c0-17.7-14.3-32-32-32z"/></svg>'''
 
 # HeartOutlined / ProductOutlined (Ant Design 风格)
@@ -61,15 +63,16 @@ _PRODUCT_OUTLINED = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024
 _CHECK_CIRCLE_OUTLINED = '''<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1024 1024"><path fill="{color}" d="M512 64C264.6 64 64 264.6 64 512s200.6 448 448 448 448-200.6 448-448S759.4 64 512 64zm193.5 301.7l-210.6 292a31.8 31.8 0 0 1-51.7 0L318.5 484.9c-3.8-5.3 0-12.7 6.5-12.7h46.9c10.2 0 19.9 4.9 25.9 13.3l71.2 98.8 157.2-218c6-8.3 15.6-13.3 25.9-13.3H699c6.5 0 10.3 7.4 6.5 12.7z"/></svg>'''
 
 _COLORS = {
-    "primary": "#165DFF",
-    "secondary": "#86909C",
+    # 更“现代/柔和”的一套颜色（偏中性，避免过饱和导致视觉噪音）
+    "primary": "#2F6BFF",
+    "secondary": "#667085",
     "success": "#00B42A",
     "danger": "#F53F3F",
-    "yellow_folder": "#FCC300",  # 黄色文件夹 饱和度约40%
-    "heart": "#F56C6C",         # 心形 低饱和红
-    "red_soft": "#F56C6C",      # 辅助红 0.7
-    "green_soft": "#67C23A",    # 辅助绿 0.7
-    "blue_soft": "#409EFF",     # 辅助蓝 0.7
+    "yellow_folder": "#FFB100",  # 黄色文件夹（略降噪）
+    "heart": "#F56C6C",          # 心形 低饱和红
+    "red_soft": "#F56C6C",       # 辅助红
+    "green_soft": "#67C23A",     # 辅助绿
+    "blue_soft": "#409EFF",      # 辅助蓝
     "neutral_bg": "#F5F7FA",
     "neutral_line": "#E5E6EB",
     "neutral_text": "#4E5969",
@@ -78,6 +81,7 @@ _COLORS = {
 }
 
 _icon_cache = {}
+_pm_logo_pixmap_cache = {}
 
 
 def _hex_to_rgba(hex_color: str, alpha: float) -> str:
@@ -129,12 +133,12 @@ def _svg_to_icon(svg_tpl: str, color: str, size: int = ICON_SIZE, opacity: float
 
 def icon_folder_root():
     """一级根文件夹：FolderFilled #165DFF"""
-    return _svg_to_icon(_FOLDER_FILLED, _COLORS["primary"])
+    return _svg_to_icon(_FOLDER_FILLED, _hex_to_rgba(_COLORS["primary"], 0.92))
 
 
 def icon_folder_sub():
     """二级及以下子文件夹：FolderOutlined #86909C"""
-    return _svg_to_icon(_FOLDER_OUTLINED, _COLORS["secondary"])
+    return _svg_to_icon(_FOLDER_OUTLINED, _hex_to_rgba(_COLORS["secondary"], 0.90))
 
 
 def icon_file_xml():
@@ -159,7 +163,7 @@ def icon_file_word():
 
 def icon_file_default():
     """其他文件 #86909C"""
-    return _svg_to_icon(_FILE_OUTLINED, _COLORS["secondary"])
+    return _svg_to_icon(_FILE_OUTLINED, _hex_to_rgba(_COLORS["secondary"], 0.92))
 
 
 def icon_for_file(path: str):
@@ -191,19 +195,63 @@ def icon_send_outlined():
     return _svg_to_icon(_SEND_OUTLINED, _COLORS["secondary"])
 
 
-def icon_pushpin_outlined():
-    """固定 utility：PushpinOutlined"""
-    return _svg_to_icon(_PUSHPIN_OUTLINED, _COLORS["primary"])
+def icon_pushpin_outlined(size: int = 16, color: str = "#F53F3F", alpha: float = 0.9):
+    """PushpinOutlined（默认红色，用于置顶语义）。"""
+    return _svg_to_icon(_PUSHPIN_OUTLINED, _hex_to_rgba(color, alpha), size)
+
+
+def icon_bars_outlined(size: int = 16, color: str = "#F53F3F", alpha: float = 0.95):
+    """BarsOutlined（默认红色）。"""
+    return _svg_to_icon(_BARS_OUTLINED, _hex_to_rgba(color, alpha), size)
 
 
 def icon_folder_yellow():
     """黄色文件夹 #FCC300"""
-    return _svg_to_icon(_FOLDER_YELLOW, _COLORS["yellow_folder"])
+    return _svg_to_icon(_FOLDER_YELLOW, _hex_to_rgba(_COLORS["yellow_folder"], 0.92))
 
 
 def icon_heart_outlined(size: int = 16):
     """收藏项目库：HeartOutlined #F56C6C 透明度 0.8"""
     return _svg_to_icon(_HEART_OUTLINED, _hex_to_rgba(_COLORS["heart"], 0.8), size)
+
+
+def pfn_header_logo_pixmap(size: int = 24, radius: int = 7) -> QPixmap:
+    """左侧「项目管理栏」标题旁：优先使用 assets/pfn_logo_source.png（圆角卡片），缺失时回退心形图标。"""
+    key = (size, radius)
+    if key in _pm_logo_pixmap_cache:
+        return _pm_logo_pixmap_cache[key]
+    base = os.path.dirname(os.path.abspath(__file__))
+    png_path = os.path.join(base, "assets", "pfn_logo_source.png")
+    pm = None
+    if os.path.isfile(png_path):
+        try:
+            raw = QPixmap(png_path)
+            if not raw.isNull():
+                scaled = raw.scaled(
+                    size,
+                    size,
+                    Qt.AspectRatioMode.KeepAspectRatio,
+                    Qt.TransformationMode.SmoothTransformation,
+                )
+                out = QPixmap(size, size)
+                out.fill(Qt.GlobalColor.transparent)
+                p = QPainter(out)
+                p.setRenderHint(QPainter.RenderHint.Antialiasing)
+                p.setRenderHint(QPainter.RenderHint.SmoothPixmapTransform)
+                path = QPainterPath()
+                path.addRoundedRect(QRectF(0, 0, size, size), radius, radius)
+                p.setClipPath(path)
+                x = (size - scaled.width()) // 2
+                y = (size - scaled.height()) // 2
+                p.drawPixmap(x, y, scaled)
+                p.end()
+                pm = out
+        except Exception:
+            pm = None
+    if pm is None:
+        pm = icon_heart_outlined(size).pixmap(size, size)
+    _pm_logo_pixmap_cache[key] = pm
+    return pm
 
 
 def icon_product_outlined(size: int = 14):

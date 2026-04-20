@@ -8,11 +8,12 @@
 
 | 模块 | 说明 |
 |------|------|
-| **收藏项目库** | 左侧树：按 projects / unblinded / users 分类，支持「产品 → 试验 → 子目录」层级；支持添加、删除、打开所在文件夹。 |
-| **右侧文件树** | 选中收藏后展示项目下的聚合目录（program、util、M5、protocol 等）及匹配文档；支持双击/右键打开、显示修改时间。 |
+| **项目管理栏** | 左侧树：按 projects / unblinded / users 分类，支持「产品 → 试验 → 子目录」层级；支持添加、删除、打开所在文件夹；标题区可切回待办/分析。 |
+| **右侧视图** | 无左侧选中：显示「我的待办 / 项目数据分析」；有选中且可解析为收藏目录：显示文件树。见下文「归类规则」。 |
+| **右侧文件树** | 对**收藏项**（`config` 中有对应记录）展示按项目类型归类的聚合目录；支持双击/右键打开、显示修改时间。 |
 | **添加项目** | 从 Z 盘树中多选子目录，自动解析为产品/试验并加入收藏；支持覆盖/跳过已存在路径。 |
-| **SAS EG 集成** | .sas / .sas7bdat 可用 SAS EG 打开：新开 EG 窗口 → 自动展开服务器树到目标路径 → 双击打开（支持单文件与 Ctrl 多选批量）。 |
-| **代码/文档打开** | .sas 可选 SAS EG 或 VS Code；.sas7bdat 用 SAS EG；PDF 可选默认查看器；支持右键设置默认打开方式。 |
+| **SAS EG 集成** | .sas 与 SAS 数据集（.sas7bdat/.sas7bndx/.sas7bcat/.sd2）差异化打开：`.sas` 走 EG 自动化展开；数据集直接调用 `SEGuide.exe` 传参打开。 |
+| **代码/文档打开** | `.sas` 保留 SAS EG / VS Code；SAS 数据集仅 SAS EG；PDF 可选默认查看器。 |
 | **Utility 公共目录** | 左侧固定入口，点击后在右侧展示 `Z:\projects\utility` 目录树。 |
 | **配置与规则** | 配置文件 `config.json`；内置匹配规则（aCRF、protocol、SAP、shell、顶线、setup 等）可扩展。 |
 
@@ -20,44 +21,78 @@
 
 ## 核心功能说明
 
-### 1. 收藏项目库（左侧）
+### 1. 项目管理栏（左侧）
 
 - **分类**：根节点为 `projects`、`unblinded`、`users`（有对应收藏时才显示 users）。
 - **层级**：
   - **projects / unblinded**：产品 → 试验 → 子目录（叶子为具体收藏路径）。
   - **users**：先按 `unblinded` / `projects` 分，再按产品 → 试验 → 子目录；仅两层路径时从试验名解析产品前缀（如 `HRS7450_201` → 产品 `HRS7450`），实现与 projects 一致的归类。
 - **操作**：点击「+ 添加项目」从 Z 盘树多选并自动归类；右键节点可「打开所在文件夹」或「删除」产品/试验/子项目；同路径在树中按 `full_path` 去重，避免重复节点。
+- **与右侧联动**：点击左侧标题「项目管理栏」区域可取消树选中，右侧回到「我的待办 / 项目数据分析」；选中某条**可浏览**的节点时，右侧切换到文件树视图。
 
-### 2. 右侧文件树
+### 2. 右侧视图与归类规则（重要）
 
-- **数据来源**：选中左侧收藏后，根据项目路径与 `config` 中的 **match_rules**、**fixed_paths** 聚合展示。
+- **两视图切换**：
+  - **无选中**：右侧默认显示 **「我的待办」** 与 **「项目数据分析」** 两个标签页（项目管理、任务与图表）。
+  - **有选中**：右侧切换到 **文件树**，展示当前节点对应目录下的内容（见下）。
+- **收藏项 vs 普通目录**（决定右侧是「归类树」还是「扁平资源管理器」）：
+  - 若选中节点对应 **`config.json` 里的一条收藏**（叶子 / 试验 / 父分组 / 置顶解析出的收藏），且路径有效，则使用**内置归类布局**（与早期版本一致）。
+  - 若仅选中**没有对应收藏记录的**物理目录（例如仅展开到产品根、`Z:\projects` 等），则使用**扁平目录树**（懒加载展开，类似资源管理器）。
+- **projects / unblinded**：归类树包含 **data、M5、program、reports、protocol、data_management、statistics、review_comments、logs、util、Documents** 等聚合节点；`program` 下为 `06_programs` / `09_validation`（界面显示为 programs / validation）；`util` 下为 `utility/macros`、`utility/metadata`、`utility/tools`（显示为 macros / metadata / tools）。
+- **users**：归类树**仅**包含 **program** 与 **util** 两棵聚合（同样基于上述相对路径），**不**包含 M5、Documents 等整块，结构更精简。
+- **program 与 Documents**：规则见下节；与 `dir_type` 为 `projects` / `unblinded` / `users` 时的展示策略一致。
+
+### 3. 右侧文件树（数据来源与细节）
+
+- **数据来源**：对**收藏项**选中后，根据项目路径与 `config` 中的 **match_rules**、**fixed_paths** 聚合展示。
 - **projects / unblinded**：展示 M5、program、protocol、data_management、statistics、review_comments、util 等聚合节点；每个节点对应项目下的相对路径（如 `06_programs`、`utility/documentation/01_protocol`）；部分节点下为规则匹配到的文档（如 aCRF、protocol、SAP、shell、顶线、setup、SDTM_PDS 等）。
 - **users**：展示 program、util 等聚合节点（无 M5），结构更精简。
 - **固定路径**：如 `07_logs`、各 documentation 子路径等，可在配置中调整；`07_logs` 下可展开显示 .xml 文件及修改时间。
+- **program 聚合过滤**：`program`（`06_programs` / `09_validation`）目录树内仅展示 `.sas` 程序文件，隐藏 `.lst`、`.txt` 等非 SAS 文件。
+- **Documents 展示策略**：初次展开仅显示“常用 xlsx”；对 `Documents` 节点执行刷新后，切换为展示该目录下“全部 xlsx”。
 - **列**：第一列为名称，第二列为修改时间（右对齐、灰色）。
 
-### 3. 添加项目
+### 4. 添加项目
 
 - 对话框从 **Z 盘根** 懒加载：先显示 projects / unblinded / users，展开后加载子目录。
 - **users** 下展开到 userid 后显示 `projects`、`unblinded`，再进入具体路径。
 - 多选目录后，按路径解析为「产品 → 试验 → 子目录」并写入收藏；可选覆盖已存在路径。
 - 支持 Z 盘路径如 `Z:\projects\...`、`Z:\users\userid\unblinded\...` 等。
 
-### 4. SAS EG 打开 .sas / .sas7bdat
+### 5. SAS EG 打开（代码/数据集差异化）
 
-- **入口**：双击 .sas 会弹出「选择打开方式」（SAS EG / VS Code），可勾选「下次默认使用」；右键可设默认打开方式；.sas7bdat 默认用 SAS EG。
-- **流程**：每次**新开一个 SAS EG 进程** → 等待主窗口与服务器树就绪 → 在主窗口左侧树中展开「服务器 → SASApp → 文件」→ 按路径类型展开 **projects** 或 **users → project/unblinded** → 再展开到目标文件夹 → 在树中双击目标文件（或 Ctrl 多选后依次双击）。
-- **路径转换**：Z 盘路径会转换为 SAS 服务器 DDT 路径（如 `Z:\...` → `/u01/app/sas/sas9.4/DocumentRepository/DDT/...`），兼容 projects / users 的 project 与 unblinded。
-- **等待策略**：启动后按「服务器树是否就绪」精准等待，减少固定长时间等待；展开「文件」节点时略增等待以适配 SAS 加载。
-- **失败时**：自动化失败会降级为传参启动 SEGuide（可能乱码），并提示可手动打开文件夹后双击文件。
+- **`.sas` 代码文件**：
+  - 右键支持 `SAS EG` 与 `VS Code`；
+  - 选择 `SAS EG` 时执行自动化：新开 EG → 展开「服务器 → SASApp → 文件」→ 定位路径并打开；
+  - 适用于 projects / users 路径，仍保留原自动化兜底逻辑。
+- **SAS 数据集文件**（`.sas7bdat/.sas7bndx/.sas7bcat/.sd2`）：
+  - 右键仅保留 `用 SAS EG 打开`（无 VS Code）；
+  - 不做 UI 自动化、不展开服务器树；
+  - 直接调用 `_find_sas_eg()` 定位 `SEGuide.exe`，再 `subprocess.Popen([seguide_path] + data_paths)` 一次性传入多文件。
+- **多选行为**：多选数据集时单次调用 EG 并传入全部路径，目标效果与资源管理器右键“使用 SAS Enterprise Guide 打开”一致，尽量在同一 EG 窗口加载。
 
-### 5. 其他文件打开
+### 6. 其他文件打开
 
 - **PDF**：双击可弹窗选择打开方式（如系统默认、Adobe 等）。
 - **Excel / 其他**：通过系统关联或 ShellExecute 打开。
 - **打开所在文件夹**：收藏/文件节点右键「打开所在文件夹」；优先复用已打开的资源管理器窗口并定位到路径或选中文件。
 
-### 6. 配置
+#### setup.xlsx（编辑版 / 参考版双开）
+
+用于在同一项目下**先编辑、再对照**两份 Setup，且避免 Excel 对**同一原文件路径**重复打开时出现「同名无法打开」等问题。
+
+| 操作 | 行为 |
+|------|------|
+| **第一次打开**（当前 Excel 里**还没有**任何名为 `setup.xlsx` 的工作簿） | 直接打开**网络盘上的原文件**（可编辑）。 |
+| **第二次打开**（Excel 里**已经有一份** `setup.xlsx` 打开——**包括先开了项目 A 的 setup，再点项目 B 的 setup**，文件名相同即算） | **不再**从网络路径直接再打开 `setup.xlsx`（否则会触发 Excel「无法同时打开两个同名工作簿」）；将**当前点击**的那份原文件复制到本机临时目录 **`%TEMP%\PFN_Reference\`**，文件名为 **`{项目名称}_Setup_参考版.xlsx`**（项目名称优先取项目管理配置中的子项目名称 `subproject_name`，否则使用路径解析出的试验目录名如 `SHRxxxx_xxx`），**覆盖**同名旧文件后，用 Excel 打开该临时副本。 |
+
+**实现要点（与代码一致）**
+
+- 每次点击都重新判断：通过 **pywin32 / win32com** 连接已运行的 Excel，检查是否已有任意 **`setup.xlsx` 工作簿**（按文件名，不限是否同一路径）；未安装或 COM 失败时，用「**当前点击路径**文件独占读是否失败」作为弱兜底（无法可靠处理「已开 A 再开 B」的跨目录同名，**强烈建议安装 pywin32**）。
+- **不**使用「第几次点击」的进程内缓存；关闭 Excel 或重启工具后，行为仍由「原文件当前是否已在 Excel 中打开」决定。
+- 参考版与项目数据**不同目录**，仅临时文件；建议在环境中安装 **pywin32** 以获得稳定的「是否已打开」判断。
+
+### 7. 配置
 
 - **开发环境**：`config.json` 位于项目目录。
 - **打包后**：`config.json` 位于 `%APPDATA%\PFN\`，便于分发给他人时不含开发者个人收藏。
@@ -128,8 +163,8 @@ pyinstaller build.spec
 
 1. **Z 盘**：需已映射并可访问；左侧「添加项目」与右侧文件树均依赖 Z 盘路径。
 2. **SAS EG**：自动化需安装 pywinauto；若未安装，双击 .sas 仍可选 SAS EG，但会以降级方式传参启动（可能乱码）。
-3. **默认打开方式**：.sas 文件右键 →「设置默认打开方式」→ SAS EG 或 VS Code，之后双击即按默认打开。
-4. **多选打开**：在右侧文件树中 Ctrl+点击多个 .sas/.sas7bdat（同文件夹），再双击或右键「用 SAS EG 打开」，会在同一新 EG 窗口中依次打开。
+3. **默认打开方式**：`.sas` 文件可在右键菜单设置默认打开方式（SAS EG / VS Code）；数据集文件不提供 VS Code。
+4. **多选打开**：Ctrl 多选多个 `.sas`/数据集后右键 `用 SAS EG 打开`；其中数据集会一次性传参提交到 EG。
 5. **收藏去重**：同一路径在收藏树中只显示一次；若配置中误重复，界面展示时会按 `full_path` 去重。
 
 ---

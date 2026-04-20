@@ -2,7 +2,17 @@
 # PyInstaller 打包配置：PFN 临床试验项目导航
 # 运行: pyinstaller build.spec
 
+import os
+
 block_cipher = None
+_spec_dir = os.path.dirname(os.path.abspath(SPEC))
+# 桌面/资源管理器中的 exe 图标来自此 ICO（与运行时 setWindowIcon 无关）。
+# 换 Logo 后请先运行: python scripts/build_app_icon_from_png.py
+_APP_ICO = os.path.normpath(os.path.join(_spec_dir, "assets", "app_icon.ico"))
+if os.path.isfile(_APP_ICO):
+    print("[build.spec] exe icon:", _APP_ICO, os.path.getsize(_APP_ICO), "bytes")
+else:
+    print("[build.spec] WARNING: app_icon.ico 不存在，exe 将无自定义图标:", _APP_ICO)
 
 a = Analysis(
     ['app_qt.py'],
@@ -33,7 +43,8 @@ exe = EXE(
     debug=False,
     bootloader_ignore_signals=False,
     strip=False,
-    upx=True,
+    # UPX 压缩后，部分环境下资源管理器对 exe 内嵌图标的显示会异常（仍显示旧图或默认图标）
+    upx=False,
     upx_exclude=[],
     runtime_tmpdir=None,
     console=False,  # 无控制台窗口
@@ -42,4 +53,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
+    icon=_APP_ICO if os.path.isfile(_APP_ICO) else None,
 )
