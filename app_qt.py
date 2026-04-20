@@ -6,14 +6,17 @@ import re
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter, QListWidget, QListWidgetItem,
     QTreeWidget, QTreeWidgetItem, QMenu, QLabel, QVBoxLayout, QHBoxLayout,
-    QPushButton, QFrame, QMessageBox, QSizePolicy, QStyle, QDialog,
+    QPushButton, QFrame, QMessageBox, QSizePolicy, QStyle, QDialog, QFileDialog,
     QStyledItemDelegate, QGraphicsDropShadowEffect, QAbstractItemView,
-    QRadioButton, QCheckBox, QButtonGroup,
+    QRadioButton, QCheckBox, QButtonGroup, QLineEdit,
 )
 from PyQt6.QtCore import Qt, QSize, QTimer, QEvent
 from PyQt6.QtGui import QGuiApplication, QColor
+import html
 import sys
 import os
+import shutil
+import struct
 import subprocess
 import ctypes
 import time
@@ -104,13 +107,26 @@ def _path_segments_after_root(path, dir_type):
     root_name = _source_root_name(dir_type)
     if not root_name or not parts:
         return parts
-    # users/userid/projects 或 users/userid/unblinded：跳过 users、userid、projects 或 unblinded 共三段，再取 product/trial/subdir
-    if root_name == "users" and dir_type and "-" in dir_type:
-        if len(parts) >= 4:
-            return parts[4:]  # 跳过 users, userid, projects|unblinded，得到 product, trial, subdir...
-        if len(parts) >= 3:
-            return parts[3:]
-        return []
+    # users：不依赖 dir_type 格式，直接从路径段判断跳过层级
+    # 支持：
+    # - users/<userid>/projects|project|unblinded/<...>
+    # - users/projects|project|unblinded/<...>（无 userid）
+    if root_name == "users":
+        lower_parts = [p.lower() for p in parts]
+        # 找到 users 段位置（通常就在开头）
+        i = 0
+        while i < len(lower_parts) and lower_parts[i] != "users":
+            i += 1
+        if i >= len(lower_parts):
+            return parts
+        # users/<userid>/X
+        if i + 2 < len(lower_parts) and lower_parts[i + 2] in ("projects", "project", "unblinded"):
+            return parts[i + 3 :]
+        # users/X（无 userid）
+        if i + 1 < len(lower_parts) and lower_parts[i + 1] in ("projects", "project", "unblinded"):
+            return parts[i + 2 :]
+        # users 下其他结构：至少跳过 users 自身
+        return parts[i + 1 :]
     # projects / unblinded：只跳过根名及重复根名
     i = 0
     while i < len(parts) and parts[i].lower() != root_name:
@@ -134,13 +150,21 @@ def _product_trial_from_path(path, dir_type):
         product = segments[1] if len(segments) >= 2 else None
         trial = segments[2] if len(segments) >= 3 else None
         subdir = segments[3] if len(segments) >= 4 else None
-    # users 下仅两层（trial 文件夹 + 子目录）：从 trial 名解析产品前缀，实现按产品归类
+    # users 下仅两层：可能是 (trial/subdir) 或 (product/subdir)
     root_name = _source_root_name(dir_type)
-    if root_name == "users" and dir_type and "-" in dir_type and len(segments) == 2:
-        trial_name, subdir_name = segments[0], segments[1]
-        product = trial_name.rsplit("_", 1)[0] if "_" in trial_name else trial_name
-        trial = trial_name
-        subdir = subdir_name
+    if root_name == "users" and len(segments) == 2:
+        first, second = segments[0], segments[1]
+        # 若第一段看起来像 trial（例如 HRS7450_201），则按 trial/subdir 处理并推导 product
+        if "_" in first and first.rsplit("_", 1)[-1].isdigit():
+            trial_name, subdir_name = first, second
+            product = trial_name.rsplit("_", 1)[0]
+            trial = trial_name
+            subdir = subdir_name
+        else:
+            # 否则更像 product/subdir（例如 HRS1301/dsur），归到产品下，不生成 trial
+            product = first
+            trial = None
+            subdir = second
     return (product or "unknown", trial, subdir)
 
 
@@ -189,6 +213,7 @@ class PFNCore:
         self.matcher = FileMatcher()
         self.fs_expanded = {}
         self._match_cache = {}
+        self._doc_scan_cache = {}
         self._sas_eg_pywin32_missing = False
     
     def get_favorites(self):
@@ -217,6 +242,63 @@ class PFNCore:
         result = self.matcher.match(project_path, self.config.rules)
         self._match_cache[key] = result
         return result
+
+    def _scan_documentation_extra_files(self, scan_path):
+        """扫描指定路径下所有 .xlsx 文件，按文件名升序；结果缓存，避免重复扫描。返回 [(display, path), ...]。"""
+        if not scan_path:
+            return []
+        scan_path = os.path.normpath(scan_path).replace("/", "\\")
+        if scan_path in self._doc_scan_cache:
+            return self._doc_scan_cache[scan_path]
+        result = []
+        try:
+            if os.path.isdir(scan_path):
+                for n in sorted(os.listdir(scan_path)):
+                    if n.lower().endswith(".xlsx"):
+                        p = os.path.join(scan_path, n)
+                        if os.path.isfile(p):
+                            result.append((n, p))
+        except Exception:
+            pass
+        self._doc_scan_cache[scan_path] = result
+        return result
+
+    def get_documentation_xlsx_list(self, base_path):
+        """返回 Documentation 下拉框数据：[(display, path), ...]，中间用 (None, None) 表示分隔线。顶部常用项来自配置+match_files，分隔线下方来自 documentation_scan_path/scan_root 下其他 .xlsx。"""
+        doc_cfg = self.config.get_documentation_paths()
+        common_keys = doc_cfg.get("common") or []
+        scan_path_cfg = (doc_cfg.get("documentation_scan_path") or doc_cfg.get("scan_root") or "").strip()
+        out = []
+        common_paths = set()
+        if base_path:
+            base_path = os.path.normpath(base_path).replace("/", "\\")
+            files = self.match_files(base_path)
+            for k in common_keys:
+                key = k.replace(".xlsx", "").strip()
+                v = files.get(key)
+                if not v:
+                    continue
+                paths = v if isinstance(v, list) else [v]
+                for fp in paths:
+                    if isinstance(fp, str) and fp.lower().endswith(".xlsx") and os.path.isfile(fp):
+                        out.append((os.path.basename(fp), fp))
+                        common_paths.add(os.path.normpath(fp))
+                        break
+        need_sep = bool(out)
+        other = []
+        if scan_path_cfg:
+            root = os.path.normpath(scan_path_cfg).replace("/", "\\")
+            if not os.path.isabs(root) and base_path:
+                root = os.path.normpath(os.path.join(base_path, root))
+            extra = self._scan_documentation_extra_files(root)
+            for n, p in extra:
+                pnorm = os.path.normpath(p)
+                if pnorm not in common_paths:
+                    other.append((n, p))
+        if need_sep and other:
+            out.append((None, None))
+        out.extend(other)
+        return out
 
     def open_sas_with(self, path_or_paths, choice):
         """用指定方式打开 .sas 文件（可多选同窗口）。choice 仅为 'vscode' 时由此处理；SAS EG 由主窗口 _open_with_saseg 唯一处理。"""
@@ -492,7 +574,7 @@ class PFNCore:
             return None
         except Exception:
             return None
-
+    
     def _find_sas_eg(self):
         """优先通过开始菜单 .lnk 解析真实 exe 路径（需 pywin32），否则回退到固定路径。"""
         self._sas_eg_pywin32_missing = False
@@ -575,8 +657,9 @@ class QtMainWindow(QMainWindow):
     SHORT_WAIT = 0.2   # 短等待（控件就绪）
     MEDIUM_WAIT = 0.6  # 中等等待（节点展开/界面刷新）
     LONG_WAIT = 2.5    # 长等待（文件加载）
-    MAX_EG_START_WAIT = 25   # EG 启动后等待服务器树就绪的最大秒数（兜底）
-    TREE_CHECK_INTERVAL = 0.5  # 服务器树就绪检测间隔（秒）
+    MAX_EG_START_WAIT = 10   # EG 启动后等待服务器树就绪的最大秒数（需求≤10s）
+    TREE_CHECK_INTERVAL = 0.25  # 服务器树就绪检测间隔（秒）
+    NODE_EXPAND_TIMEOUT = 1.0   # 单节点展开检测超时（秒），需求≤1s
 
     def __init__(self, core: PFNCore):
         super().__init__()
@@ -584,7 +667,7 @@ class QtMainWindow(QMainWindow):
         self.current_fav = None
         self._showing_utility = False
         self._tree_cache = {}  # fav_id -> 已加载标记，切换回时可直接用缓存避免重复构建
-        self.setWindowTitle("PFN - 临床试验项目导航 (PyQt6)")
+        self.setWindowTitle("PFN - 临床试验项目导航")
         self.resize(1100, 720)
         self._build_ui()
         self._load_favorites()
@@ -684,6 +767,48 @@ class QtMainWindow(QMainWindow):
         add_btn.clicked.connect(self._add_project)
         header.addWidget(add_btn)
         left_layout.addLayout(header)
+
+        # 收藏库顶部搜索栏 + 扁平下拉列表
+        self.fav_search_edit = QLineEdit()
+        self.fav_search_edit.setPlaceholderText("搜索收藏项目")
+        self.fav_search_edit.setClearButtonEnabled(True)
+        self.fav_search_edit.setFixedHeight(26)
+        self.fav_search_edit.setStyleSheet(
+            "QLineEdit{border:1px solid #D0D3D8; border-radius:4px; padding:2px 8px; font-size:11px;}"
+            "QLineEdit:focus{border-color:#165DFF;}"
+        )
+        left_layout.addWidget(self.fav_search_edit)
+
+        # 下拉层：半透明 QListWidget，扁平单行路径
+        self.fav_search_list = QListWidget(left)
+        self.fav_search_list.setWindowFlags(Qt.WindowType.SubWindow)
+        self.fav_search_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.fav_search_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.fav_search_list.setMaximumHeight(8 * 25)
+        self.fav_search_list.setSpacing(0)
+        self.fav_search_list.setUniformItemSizes(True)
+        self.fav_search_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.fav_search_list.setStyleSheet(
+            "QListWidget{background:rgba(255,255,255,217); border:1px solid #D0D3D8; font-size:9px; outline:none;}"
+            "QListWidget::item{padding:2px 6px; border:none; outline:none;}"
+            "QListWidget::item:focus, QListWidget::item:hover{outline:none; border:none;}"
+            "QListWidget::item:selected{background:#E8F3FF; color:#165DFF; outline:none; border:none;}"
+            "QScrollBar:vertical{width:8px;}"
+        )
+        self.fav_search_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        # 用状态栏替代 tooltip，避免悬停黑框
+        self.fav_search_list.setMouseTracking(True)
+        if self.fav_search_list.viewport():
+            self.fav_search_list.viewport().setMouseTracking(True)
+        self.fav_search_list.itemEntered.connect(self._on_fav_search_item_hover)
+        if self.fav_search_list.viewport():
+            self.fav_search_list.viewport().setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.fav_search_list.hide()
+
+        self.fav_search_edit.textChanged.connect(self._on_fav_search_changed)
+        self.fav_search_edit.installEventFilter(self)
+        self.fav_search_list.itemClicked.connect(self._on_fav_search_item_clicked)
+
         self.fav_tree = QTreeWidget()
         self.fav_tree.setHeaderHidden(True)
         self.fav_tree.setIndentation(16)
@@ -741,6 +866,30 @@ class QtMainWindow(QMainWindow):
     def eventFilter(self, obj, event):
         if obj is self.tree and event.type() == QEvent.Type.Resize:
             self._update_right_tree_columns()
+        # 收藏搜索下拉：输入框按键 & 失焦隐藏
+        if obj is getattr(self, "fav_search_edit", None):
+            if event.type() == QEvent.Type.KeyPress:
+                if event.key() in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+                    if self.fav_search_list.isVisible() and self.fav_search_list.count() > 0:
+                        row = self.fav_search_list.currentRow()
+                        if event.key() == Qt.Key.Key_Down:
+                            row = 0 if row < 0 else min(row + 1, self.fav_search_list.count() - 1)
+                        else:
+                            row = self.fav_search_list.count() - 1 if row < 0 else max(row - 1, 0)
+                        self.fav_search_list.setCurrentRow(row)
+                        return True
+                if event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter:
+                    item = self.fav_search_list.currentItem()
+                    if item:
+                        self._on_fav_search_item_clicked(item)
+                        return True
+                if event.key() == Qt.Key.Key_Escape:
+                    self.fav_search_edit.clear()
+                    self._hide_fav_search_list()
+                    return True
+            elif event.type() == QEvent.Type.FocusOut:
+                # 点击列表本身时不要立刻隐藏，由列表点击回调来隐藏
+                QTimer.singleShot(150, self._hide_fav_search_list)
         return super().eventFilter(obj, event)
 
     def _add_folder_node(self, display_name, p, parent=None):
@@ -782,9 +931,11 @@ class QtMainWindow(QMainWindow):
         docs_root.setData(0, Qt.ItemDataRole.UserRole, None)
         docs_root.setData(1, Qt.ItemDataRole.UserRole, "docs_root")
         docs_root.setIcon(0, icon_product_outlined(14))
+        base = os.path.normpath(base).replace("/", "\\")
         files = self.core.match_files(base)
         doc_order = ["setup", "PDT", "SDTM_PDS", "ADAM_PDS", "PIT", "QCT"]
         file_items = []
+        common_paths = set()
         for k in doc_order:
             v = files.get(k)
             if not v:
@@ -796,6 +947,7 @@ class QtMainWindow(QMainWindow):
                 except Exception:
                     m = 0
                 file_items.append((doc_order.index(k), k, fp, m))
+                common_paths.add(os.path.normpath(fp))
         file_items.sort(key=lambda x: (x[0], -x[3]))
         for _idx, k, fp, _m in file_items:
             name = _strip_prefix(os.path.basename(fp))
@@ -807,13 +959,249 @@ class QtMainWindow(QMainWindow):
             leaf.setToolTip(0, fp)
             leaf.setIcon(0, icon_for_file_soft(fp, 14))
             docs_root.addChild(leaf)
+        # 追加 documentation 目录下的其它 xlsx：优先用配置的 documentation_scan_path / scan_root；
+        # 若未配置，则默认使用 base\\utility\\documentation。
+        doc_cfg = self.core.config.get_documentation_paths()
+        scan_path_cfg = (doc_cfg.get("documentation_scan_path") or doc_cfg.get("scan_root") or "").strip()
+        root = None
+        if scan_path_cfg:
+            root = os.path.normpath(scan_path_cfg).replace("/", "\\")
+            if not os.path.isabs(root):
+                root = os.path.normpath(os.path.join(base, root))
+        else:
+            root = os.path.normpath(os.path.join(base, "utility", "documentation")).replace("/", "\\")
+        if root and os.path.isdir(root):
+            for name, fp in self.core._scan_documentation_extra_files(root):
+                pnorm = os.path.normpath(fp)
+                if pnorm in common_paths:
+                    continue
+                mtime = _mtime_str(fp)
+                leaf = QTreeWidgetItem([name, mtime])
+                leaf.setData(0, Qt.ItemDataRole.UserRole, fp)
+                leaf.setData(1, Qt.ItemDataRole.UserRole, "file")
+                leaf.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                leaf.setToolTip(0, fp)
+                leaf.setIcon(0, icon_for_file_soft(fp, 14))
+                docs_root.addChild(leaf)
         return docs_root
-
+    
     def _show_loading(self):
         self.loading.show()
     
     def _hide_loading(self):
         self.loading.hide()
+
+    def _normalize_search_text(self, s: str) -> str:
+        s = (s or "").strip().lower()
+        # 忽略分隔符：csr01 匹配 csr_01 / csr-01 / csr 01
+        return re.sub(r"[\s_\-\\/]+", "", s)
+
+    def _flatten_fav_tree_index(self):
+        """把当前收藏树中“可定位”的节点扁平化成 [(flat_text, full_path, fav_id)]"""
+        out = []
+
+        def _flat_path_for_item(item: QTreeWidgetItem) -> str:
+            parts = []
+            cur = item
+            while cur is not None:
+                t = (cur.text(0) or "").strip()
+                if t:
+                    parts.insert(0, t)
+                cur = cur.parent()
+            return "/".join(parts)
+
+        def _direct_full_path_and_id(item: QTreeWidgetItem):
+            fav = item.data(0, Qt.ItemDataRole.UserRole)
+            items = item.data(0, Qt.ItemDataRole.UserRole + 2)
+            if isinstance(fav, dict) and fav.get("full_path"):
+                return fav.get("full_path", "") or "", fav.get("id", "") or ""
+            if isinstance(items, list) and items and isinstance(items[0], dict) and items[0].get("full_path"):
+                return items[0].get("full_path", "") or "", items[0].get("id", "") or ""
+            return "", ""
+
+        def walk(item: QTreeWidgetItem):
+            flat = _flat_path_for_item(item)
+            direct_fp, fid = _direct_full_path_and_id(item)
+            collected = []
+            if direct_fp:
+                collected.append(os.path.normpath(direct_fp).replace("/", "\\"))
+
+            # 递归收集子路径
+            child_paths = []
+            for i in range(item.childCount()):
+                child_paths.extend(walk(item.child(i)))
+
+            collected.extend(child_paths)
+
+            # 当前节点若没有直绑 full_path，则用子孙路径的 commonpath 来补齐（用于 csr_01 这种中间层级）
+            node_fp = ""
+            if collected:
+                try:
+                    node_fp = os.path.commonpath(collected)
+                except Exception:
+                    node_fp = collected[0]
+            if node_fp:
+                # 只保留“最小节点”的路径：同一个 full_path 后面会用去重策略选择更深层的 flat
+                out.append((flat, node_fp, fid))
+
+            return collected
+
+        for i in range(self.fav_tree.topLevelItemCount()):
+            walk(self.fav_tree.topLevelItem(i))
+
+        # 去重：同一 (full_path, flat) 只保留一次；同一 full_path 取更深层 flat（更长）优先
+        best_by_fp = {}
+        seen_pair = set()
+        for flat, fp, fid in out:
+            fp = os.path.normpath(fp).replace("/", "\\")
+            pair = (fp.lower(), flat.lower())
+            if pair in seen_pair:
+                continue
+            seen_pair.add(pair)
+            k = fp.lower()
+            if k not in best_by_fp or len(flat) > len(best_by_fp[k][0]):
+                best_by_fp[k] = (flat, fp, fid)
+        self._fav_flat_paths = list(best_by_fp.values())
+
+    def _hide_fav_search_list(self):
+        if getattr(self, "fav_search_list", None) is None:
+            return
+        if self.fav_search_list.isVisible():
+            self.fav_search_list.hide()
+
+    def _position_fav_search_list(self):
+        """把下拉层贴到搜索框下方，宽度对齐，最多 8 行"""
+        if not self.fav_search_list or not self.fav_search_edit:
+            return
+        # 位置：相对 left 容器
+        x = self.fav_search_edit.x()
+        y = self.fav_search_edit.y() + self.fav_search_edit.height()
+        w = self.fav_search_edit.width()
+        rows = min(self.fav_search_list.count(), 8)
+        h = max(1, rows) * 25 + 2
+        self.fav_search_list.setGeometry(x, y, w, h)
+        self.fav_search_list.raise_()
+
+    def _on_fav_search_changed(self, text: str):
+        """收藏库搜索：扁平单行路径下拉"""
+        q = self._normalize_search_text(text)
+        if not q:
+            self.fav_search_list.clear()
+            self._hide_fav_search_list()
+            return
+        # 确保索引存在
+        if not hasattr(self, "_fav_flat_paths") or not getattr(self, "_fav_flat_paths", None):
+            self._flatten_fav_tree_index()
+
+        matches = []
+        for flat, fp, fid in getattr(self, "_fav_flat_paths", []):
+            if q in self._normalize_search_text(flat):
+                matches.append((flat, fp, fid))
+
+        self.fav_search_list.clear()
+        if not matches:
+            self._hide_fav_search_list()
+            return
+
+        # 最多显示 200 条（下拉层只显示 8 行，滚动可看更多）
+        matches = matches[:200]
+        def _leaf_label_from_flat(s: str) -> str:
+            return (s.split("/")[-1] if s else "").strip()
+
+        def _is_csr_like(label: str) -> bool:
+            lab = (label or "").strip()
+            if not lab:
+                return False
+            # csr_01 / adar_01 / scs_01 都用同一“对勾”图标
+            return bool(re.match(r"^(csr|adar|scs|dsur)_?\d+$", lab, flags=re.I)) or any(
+                k in lab.lower() for k in ("csr", "adar", "scs", "dsur")
+            )
+
+        for flat, fp, fid in matches:
+            it = QListWidgetItem()
+            it.setData(Qt.ItemDataRole.UserRole, {"flat": flat, "full_path": fp, "id": fid})
+
+            leaf = _leaf_label_from_flat(flat)
+            if _is_csr_like(leaf):
+                pix = icon_check_circle_outlined(12).pixmap(12, 12)
+            else:
+                pix = icon_folder_yellow().pixmap(14, 14)
+
+            # 高亮匹配（保持你现在看到的红色高亮效果）
+            safe = html.escape(flat)
+            raw_lower = flat.lower()
+            q_raw = (text or "").strip().lower()
+            idx = raw_lower.find(q_raw) if q_raw else -1
+            if idx >= 0 and q_raw:
+                before = html.escape(flat[:idx])
+                mid = html.escape(flat[idx: idx + len(q_raw)])
+                after = html.escape(flat[idx + len(q_raw):])
+                rich = f"{before}<span style='color:#FF4444;'>{mid}</span>{after}"
+            else:
+                rich = safe
+
+            row = QWidget()
+            row.setStyleSheet("background:transparent; border:none; outline:none;")
+            row.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            lay = QHBoxLayout(row)
+            lay.setContentsMargins(4, 0, 4, 0)
+            lay.setSpacing(6)
+            icon_lbl = QLabel()
+            icon_lbl.setFixedSize(14, 14)
+            icon_lbl.setStyleSheet("background:transparent; border:none; outline:none;")
+            icon_lbl.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            icon_lbl.setPixmap(pix)
+            txt_lbl = QLabel()
+            txt_lbl.setTextFormat(Qt.TextFormat.RichText)
+            txt_lbl.setStyleSheet("background:transparent; border:none; outline:none; font-size:9px;")
+            txt_lbl.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            txt_lbl.setText(rich)
+            lay.addWidget(icon_lbl, 0)
+            lay.addWidget(txt_lbl, 1)
+
+            self.fav_search_list.addItem(it)
+            it.setSizeHint(QSize(10, 23))
+            self.fav_search_list.setItemWidget(it, row)
+
+            # 路径失效标红（文本本身）
+            try:
+                if not os.path.exists(fp):
+                    it.setForeground(QColor("#FF4444"))
+            except Exception:
+                pass
+
+        self._position_fav_search_list()
+        self.fav_search_list.setCurrentRow(0)
+        self.fav_search_list.show()
+
+    def _on_fav_search_item_clicked(self, item):
+        """点击搜索结果：隐藏下拉层 -> 高亮收藏树 -> 右侧定位"""
+        try:
+            payload = item.data(Qt.ItemDataRole.UserRole) or {}
+        except Exception:
+            payload = {}
+        fp = (payload.get("full_path") or "").strip()
+        fid = (payload.get("id") or "").strip()
+        self._hide_fav_search_list()
+        self.fav_search_edit.clearFocus()
+
+        if fp:
+            # 右侧定位：按收藏路径刷新右侧文件树
+            self._showing_utility = False
+            self.current_fav = {"id": fid or fp, "full_path": fp, "display_name": os.path.basename(fp), "dir_type": get_source_id_from_path(fp)}
+            QTimer.singleShot(0, self._do_refresh_tree)
+        if fid:
+            self._select_fav_in_tree(fid)
+
+    def _on_fav_search_item_hover(self, item):
+        """悬停搜索结果：在状态栏显示完整路径（替代 tooltip，避免黑框）。"""
+        try:
+            payload = item.data(Qt.ItemDataRole.UserRole) or {}
+        except Exception:
+            payload = {}
+        fp = (payload.get("full_path") or "").strip()
+        if fp:
+            self.statusBar().showMessage(fp, 2000)
     
     def _load_favorites(self):
         self.fav_tree.clear()
@@ -937,7 +1325,13 @@ class QtMainWindow(QMainWindow):
                                         leaf = QTreeWidgetItem([label])
                                         leaf.setData(0, Qt.ItemDataRole.UserRole, fav)
                                         leaf.setData(0, Qt.ItemDataRole.UserRole + 1, "leaf")
-                                        leaf.setIcon(0, icon_check_circle_outlined(12) if re.match(r"^csr_?\\d*$", label, re.I) or (label and "csr" in label.lower()) else icon_folder_yellow())
+                                        leaf.setIcon(
+                                            0,
+                                            icon_check_circle_outlined(12)
+                                            if re.match(r"^(csr|adar|scs|dsur)_?\\d*$", label, re.I)
+                                            or (label and any(k in label.lower() for k in ("csr", "adar", "scs", "dsur")))
+                                            else icon_folder_yellow(),
+                                        )
                                         trial_node.addChild(leaf)
                                     product_node.addChild(trial_node)
                                 else:
@@ -970,8 +1364,10 @@ class QtMainWindow(QMainWindow):
                                 if p.lower() == rn:
                                     product_root_path = "\\".join(parts[: i + 1] + [product])
                                     break
-                            if not product_root_path and all_favs:
-                                product_root_path = os.path.normpath(os.path.join(os.path.dirname(all_favs[0]["full_path"]), "..", product)).replace("/", "\\")
+                        if not product_root_path and all_favs:
+                            product_root_path = os.path.normpath(
+                                os.path.join(os.path.dirname(all_favs[0]["full_path"]), "..", product)
+                            ).replace("/", "\\")
                         product_node.setData(0, Qt.ItemDataRole.UserRole, {
                             "full_path": product_root_path or (all_favs[0]["full_path"] if all_favs else ""),
                             "display_name": product,
@@ -999,7 +1395,13 @@ class QtMainWindow(QMainWindow):
                                     leaf = QTreeWidgetItem([label])
                                     leaf.setData(0, Qt.ItemDataRole.UserRole, fav)
                                     leaf.setData(0, Qt.ItemDataRole.UserRole + 1, "leaf")
-                                    leaf.setIcon(0, icon_check_circle_outlined(12) if re.match(r"^csr_?\\d*$", label, re.I) or (label and "csr" in label.lower()) else icon_folder_yellow())
+                                    leaf.setIcon(
+                                        0,
+                                        icon_check_circle_outlined(12)
+                                        if re.match(r"^(csr|adar|scs|dsur)_?\\d*$", label, re.I)
+                                        or (label and any(k in label.lower() for k in ("csr", "adar", "scs", "dsur")))
+                                        else icon_folder_yellow(),
+                                    )
                                     trial_node.addChild(leaf)
                                 product_node.addChild(trial_node)
                             else:
@@ -1035,12 +1437,22 @@ class QtMainWindow(QMainWindow):
                             child = QTreeWidgetItem([label])
                             child.setData(0, Qt.ItemDataRole.UserRole, f)
                             child.setData(0, Qt.ItemDataRole.UserRole + 1, "leaf")
-                            child.setIcon(0, icon_check_circle_outlined(12) if re.match(r"^csr_\\d+$", label, re.I) else icon_folder_yellow())
+                            child.setIcon(
+                                0,
+                                icon_check_circle_outlined(12)
+                                if re.match(r"^(csr|adar|scs|dsur)_?\\d+$", label, re.I)
+                                else icon_folder_yellow(),
+                            )
                             parent.addChild(child)
                         root.addChild(parent)
             self.fav_tree.addTopLevelItem(root)
         if self.current_fav:
             self._select_fav_in_tree(self.current_fav.get("id"))
+        # 刷新扁平搜索索引
+        try:
+            self._flatten_fav_tree_index()
+        except Exception:
+            self._fav_flat_paths = []
 
     def _open_folder_with_feedback(self, folder_path, select_path=None):
         """打开文件夹：路径校验、执行、状态栏提示及操作反馈。
@@ -1103,10 +1515,23 @@ class QtMainWindow(QMainWindow):
             return
         self._showing_utility = False
         fav = item.data(0, Qt.ItemDataRole.UserRole)
+        node_type = item.data(0, Qt.ItemDataRole.UserRole + 1)
+        # 产品节点只用于分组/展开，不刷新右侧（避免出现一堆红色不可用高亮）
+        if node_type == "product" and isinstance(fav, dict) and fav.get("is_product_node"):
+            self.current_fav = None
+            self.tree.clear()
+            self.update_status("请选择具体试验或子目录（csr_01 / adar_01 等）")
+            return
+        # 试验节点（如 SHR1918_301）下有多个子目录时，点击试验不默认显示第一个子节点，右侧清空
+        items = item.data(0, Qt.ItemDataRole.UserRole + 2)
+        if node_type == "trial" and items:
+            self.current_fav = None
+            self.tree.clear()
+            self.update_status("请选择具体子目录（如 csr_01 / adar_01）")
+            return
         if fav:
             self.current_fav = fav
         else:
-            items = item.data(0, Qt.ItemDataRole.UserRole + 2)
             if items:
                 self.current_fav = items[0]
             else:
@@ -1505,7 +1930,7 @@ class QtMainWindow(QMainWindow):
                     self._open_with_saseg_fallback(seguide_path, paths)
                     return
                 self._expand_single_node(server_item, "服务器")
-                time.sleep(self.MEDIUM_WAIT)
+                time.sleep(0.15)
                 sasapp = server_item.child_window(title="SASApp", control_type="TreeItem")
                 if not sasapp.exists():
                     sasapp = server_item.child_window(title_re=".*SASApp.*", control_type="TreeItem")
@@ -1514,7 +1939,7 @@ class QtMainWindow(QMainWindow):
                     self._open_with_saseg_fallback(seguide_path, paths)
                     return
                 self._expand_single_node(sasapp, "SASApp")
-                time.sleep(self.MEDIUM_WAIT)
+                time.sleep(0.15)
                 file_node = None
                 for name in ["文件", "Files", "文件系统", "File System"]:
                     try:
@@ -1542,9 +1967,8 @@ class QtMainWindow(QMainWindow):
                     self._open_with_saseg_fallback(seguide_path, paths)
                     return
                 self._expand_single_node(file_node, file_node.window_text() or "文件")
-                time.sleep(self.MEDIUM_WAIT)
+                time.sleep(0.08)
                 current = file_node
-                # 按 path_type 展开根节点（projects 或 users→project / users→unblinded）
                 if path_type == "projects":
                     for child in current.children():
                         try:
@@ -1554,7 +1978,7 @@ class QtMainWindow(QMainWindow):
                                 break
                         except Exception:
                             continue
-                elif path_type == "users_project":
+                elif path_type in ("users_project", "users_unblinded", "users_projects"):
                     for child in current.children():
                         try:
                             if "users" in (child.window_text() or "").lower():
@@ -1563,43 +1987,18 @@ class QtMainWindow(QMainWindow):
                                 break
                         except Exception:
                             continue
-                    for child in current.children():
-                        try:
-                            if "project" in (child.window_text() or "").lower():
-                                current = child
-                                self._expand_single_node(current, "project")
-                                break
-                        except Exception:
-                            continue
-                elif path_type == "users_unblinded":
-                    for child in current.children():
-                        try:
-                            if "users" in (child.window_text() or "").lower():
-                                current = child
-                                self._expand_single_node(current, "users")
-                                break
-                        except Exception:
-                            continue
-                    for child in current.children():
-                        try:
-                            if "unblinded" in (child.window_text() or "").lower():
-                                current = child
-                                self._expand_single_node(current, "unblinded")
-                                break
-                        except Exception:
-                            continue
-                time.sleep(self.MEDIUM_WAIT)
+                time.sleep(0.06)
+                # path_levels 已含 userid、projects/project/unblinded 及后续，统一由下方循环逐级展开
                 for part in path_levels:
                     try:
                         current.click_input()
-                        time.sleep(self.SHORT_WAIT)
+                        time.sleep(0.05)
                     except Exception:
                         pass
-                    if not current.is_expanded():
-                        current.expand()
-                        time.sleep(self.MEDIUM_WAIT)
+                    if not self._is_node_expanded(current):
+                        self._expand_single_node(current, (current.window_text() or "当前节点"))
                     else:
-                        time.sleep(self.SHORT_WAIT)
+                        time.sleep(0.05)
                     found = False
                     for child in current.children():
                         try:
@@ -1607,17 +2006,11 @@ class QtMainWindow(QMainWindow):
                             if t == part or t.lower() == part.lower():
                                 current = child
                                 current.ensure_visible()
-                                time.sleep(self.SHORT_WAIT)
-                                try:
-                                    current.click_input()
-                                    time.sleep(self.SHORT_WAIT)
-                                except Exception:
-                                    pass
-                                if not current.is_expanded():
-                                    current.expand()
-                                    time.sleep(self.MEDIUM_WAIT)
+                                time.sleep(0.05)
+                                if not self._is_node_expanded(current):
+                                    self._expand_single_node(current, part)
                                 else:
-                                    time.sleep(self.SHORT_WAIT)
+                                    time.sleep(0.05)
                                 found = True
                                 break
                         except Exception:
@@ -1627,7 +2020,7 @@ class QtMainWindow(QMainWindow):
                         self._open_with_saseg_fallback(seguide_path, paths)
                         return
                 current.click_input()
-                time.sleep(self.MEDIUM_WAIT)
+                time.sleep(0.12)
             # 批量打开：依次双击每个选中文件（.sas/.sas7bdat），单个失败不中断其余
             success_count = 0
             for idx, target_name in enumerate(file_names):
@@ -1696,16 +2089,36 @@ class QtMainWindow(QMainWindow):
         return common_dir, folder_parts, file_names
 
     def _saseg_path_type_and_levels(self, folder_parts):
-        """根据 Z 盘路径段识别 path_type（projects / users_project / users_unblinded）及展开用的 path_levels（根节点之后的层级）。"""
+        """根据 Z 盘路径段识别 path_type 及展开用的 path_levels。
+        支持：projects；users/project、users/unblinded、users/projects；
+        users/<userid>/project、users/<userid>/unblinded、users/<userid>/projects。"""
         if not folder_parts:
             return "projects", []
         lower_parts = [p.lower() for p in folder_parts]
         if lower_parts[0] == "projects":
             return "projects", folder_parts[1:]
-        for i in range(len(folder_parts) - 1):
-            if lower_parts[i] == "users" and lower_parts[i + 1] in ("project", "unblinded"):
-                path_type = "users_project" if lower_parts[i + 1] == "project" else "users_unblinded"
-                return path_type, folder_parts[i + 2 :]
+        if lower_parts[0] != "users":
+            return "projects", folder_parts
+        # users 下：users/<userid>/projects 或 users/projects（path_levels 含 userid+projects 或 projects+后续）
+        if len(lower_parts) >= 3 and lower_parts[2] == "projects":
+            path_levels = [folder_parts[1], folder_parts[2]] + folder_parts[3:]
+            print(f"[SAS EG] 路径类型: users_projects, 展开层级: {path_levels}")
+            return "users_projects", path_levels
+        if len(lower_parts) >= 2 and lower_parts[1] == "projects":
+            path_levels = [folder_parts[1]] + folder_parts[2:]
+            print(f"[SAS EG] 路径类型: users_projects, 展开层级: {path_levels}")
+            return "users_projects", path_levels
+        # users/<userid>/project、users/<userid>/unblinded（树结构为 users→userid→project|unblinded→…）
+        if len(lower_parts) >= 3 and lower_parts[2] in ("project", "unblinded"):
+            path_type = "users_project" if lower_parts[2] == "project" else "users_unblinded"
+            path_levels = [folder_parts[1], folder_parts[2]] + folder_parts[3:]
+            print(f"[SAS EG] 路径类型: {path_type}, 展开层级: {path_levels}")
+            return path_type, path_levels
+        if len(lower_parts) >= 2 and lower_parts[1] in ("project", "unblinded"):
+            path_type = "users_project" if lower_parts[1] == "project" else "users_unblinded"
+            path_levels = [folder_parts[1]] + folder_parts[2:]
+            print(f"[SAS EG] 路径类型: {path_type}, 展开层级: {path_levels}")
+            return path_type, path_levels
         return "projects", folder_parts
 
     def _group_paths_by_folder(self, paths):
@@ -1792,24 +2205,80 @@ class QtMainWindow(QMainWindow):
             QTimer.singleShot(0, lambda e=elapsed, m=self.MAX_EG_START_WAIT: self.update_status(f"等待控件就绪… ({e}/{m} 秒)"))
         raise RuntimeError(f"超时 {self.MAX_EG_START_WAIT} 秒，服务器树控件仍未就绪")
 
+    def _is_node_expanded(self, node):
+        """检测树节点是否已展开，避免重复等待/展开。"""
+        try:
+            props = getattr(node, "get_properties", None)
+            if props and callable(props):
+                d = props()
+                if isinstance(d, dict) and d.get("ExpandState") == 1:
+                    return True
+        except Exception:
+            pass
+        try:
+            if getattr(node, "is_expanded", None) and callable(node.is_expanded):
+                return node.is_expanded()
+        except Exception:
+            pass
+        try:
+            ch = node.children()
+            return len(ch) > 0
+        except Exception:
+            pass
+        return False
+
     def _expand_single_node(self, node, node_name):
-        """展开单个树节点；对「文件/Files」节点略增加等待以适配 SAS 加载延迟，其余极快。"""
+        """展开单个树节点：已展开则跳过；仅控件检测+最短超时（≤1s），无固定 sleep；失败重试 1 次。"""
+        if not getattr(node, "exists", lambda: True)():
+            raise RuntimeError(f"节点「{node_name}」不存在")
         try:
             node.ensure_visible()
-            if "文件" in node_name or "Files" in node_name:
-                time.sleep(self.SHORT_WAIT * 2)
-            else:
-                time.sleep(self.SHORT_WAIT)
-
-            if not node.is_expanded():
-                node.expand()
-                if "文件" in node_name or "Files" in node_name:
-                    time.sleep(0.5)
-                else:
-                    time.sleep(0.3)
-            return True
         except Exception:
-            raise Exception(f"节点「{node_name}」展开失败")
+            pass
+        if self._is_node_expanded(node):
+            return
+        poll_interval = 0.04
+        timeout = self.NODE_EXPAND_TIMEOUT
+
+        def _do_expand():
+            try:
+                if getattr(node, "expand", None) and callable(node.expand):
+                    node.expand()
+            except Exception:
+                pass
+            start = time.time()
+            while time.time() - start < timeout:
+                if self._is_node_expanded(node):
+                    return True
+                time.sleep(poll_interval)
+            if self._is_node_expanded(node):
+                return True
+            try:
+                node.click_input(button="left")
+                if getattr(node, "expand", None) and callable(node.expand):
+                    node.expand()
+            except Exception:
+                pass
+            start = time.time()
+            while time.time() - start < timeout:
+                if self._is_node_expanded(node):
+                    return True
+                time.sleep(poll_interval)
+            if self._is_node_expanded(node):
+                return True
+            try:
+                node.double_click_input()
+            except Exception:
+                pass
+            time.sleep(poll_interval * 2)
+            return bool(self._is_node_expanded(node))
+
+        if _do_expand():
+            return
+        # 重试 1 次
+        if _do_expand():
+            return
+        raise RuntimeError(f"节点「{node_name}」展开超时（已重试），可改为手动在 SAS EG 中展开。")
 
     def _expand_sasapp_tree_main(self, main_eg_win, path_type, path_levels):
         """在 SAS EG 主界面左侧服务器树中逐级展开到目标文件夹。
@@ -1823,7 +2292,7 @@ class QtMainWindow(QMainWindow):
         except Exception:
             raise RuntimeError("无法定位 SAS EG 主界面的服务器树控件，请检查界面布局。")
         tree_ctrl.set_focus()
-        time.sleep(self.SHORT_WAIT)
+        time.sleep(0.02)
         server_node = None
         try:
             server_node = tree_ctrl.child_window(title="服务器", control_type="TreeItem")
@@ -1860,7 +2329,7 @@ class QtMainWindow(QMainWindow):
         if sasapp_node is None:
             raise RuntimeError("无法定位「SASApp」节点。")
         self._expand_single_node(sasapp_node, "SASApp")
-        time.sleep(self.MEDIUM_WAIT)
+        time.sleep(0.02)
         files_node = None
         possible_names = ["文件", "Files", "文件系统", "File System", "My Computer", "This PC", "此电脑"]
         for name in possible_names:
@@ -1886,7 +2355,7 @@ class QtMainWindow(QMainWindow):
                 "展开 SASApp 后无法找到「文件」/「Files」节点。请确认 SAS EG 中该节点名称，并可将名称加入 possible_names 列表。"
             )
         self._expand_single_node(files_node, files_node.window_text() or "文件")
-        time.sleep(self.MEDIUM_WAIT)
+        time.sleep(0.02)
         current_node = files_node
 
         if path_type == "projects":
@@ -1902,7 +2371,7 @@ class QtMainWindow(QMainWindow):
                 raise RuntimeError("无法定位「projects」节点。")
             self._expand_single_node(proj_node, "projects")
             current_node = proj_node
-        elif path_type == "users_project":
+        elif path_type in ("users_project", "users_unblinded", "users_projects"):
             users_node = None
             for c in current_node.children():
                 try:
@@ -1915,44 +2384,7 @@ class QtMainWindow(QMainWindow):
                 raise RuntimeError("无法定位「users」节点。")
             self._expand_single_node(users_node, "users")
             current_node = users_node
-            project_node = None
-            for c in current_node.children():
-                try:
-                    if "project" in (c.window_text() or "").lower():
-                        project_node = c
-                        break
-                except Exception:
-                    continue
-            if project_node is None or not getattr(project_node, "exists", lambda: True)():
-                raise RuntimeError("无法定位「project」节点（users 下）。")
-            self._expand_single_node(project_node, "project")
-            current_node = project_node
-        elif path_type == "users_unblinded":
-            users_node = None
-            for c in current_node.children():
-                try:
-                    if "users" in (c.window_text() or "").lower():
-                        users_node = c
-                        break
-                except Exception:
-                    continue
-            if users_node is None or not getattr(users_node, "exists", lambda: True)():
-                raise RuntimeError("无法定位「users」节点。")
-            self._expand_single_node(users_node, "users")
-            current_node = users_node
-            unblinded_node = None
-            for c in current_node.children():
-                try:
-                    if "unblinded" in (c.window_text() or "").lower():
-                        unblinded_node = c
-                        break
-                except Exception:
-                    continue
-            if unblinded_node is None or not getattr(unblinded_node, "exists", lambda: True)():
-                raise RuntimeError("无法定位「unblinded」节点（users 下）。")
-            self._expand_single_node(unblinded_node, "unblinded")
-            current_node = unblinded_node
-        time.sleep(self.MEDIUM_WAIT)
+        time.sleep(0.02)
 
         for level in path_levels:
             child_node = None
@@ -1974,9 +2406,9 @@ class QtMainWindow(QMainWindow):
                 raise RuntimeError(f"在节点「{current_node.window_text()}」下无法找到子节点「{level}」。")
             self._expand_single_node(child_node, level)
             current_node = child_node
-            time.sleep(self.MEDIUM_WAIT)
+            time.sleep(0.02)
         current_node.click_input()
-        time.sleep(self.MEDIUM_WAIT)
+        time.sleep(0.05)
         QTimer.singleShot(0, lambda: self.update_status("主界面服务器树展开完成。"))
         return current_node
 
@@ -2320,7 +2752,7 @@ class QtMainWindow(QMainWindow):
                             self._close_obstructing_popups(app, mw)
                         except Exception:
                             pass
-                        return
+                    return
                 except Exception:
                     continue
             for btn in dlg.descendants(control_type="Button"):
@@ -2334,7 +2766,7 @@ class QtMainWindow(QMainWindow):
                             self._close_obstructing_popups(app, mw)
                         except Exception:
                             pass
-                        return
+                    return
                 except Exception:
                     continue
         except Exception:
@@ -2450,8 +2882,12 @@ class QtMainWindow(QMainWindow):
         menu = QMenu(self)
         is_pdf = path.lower().endswith(".pdf")
         is_sas = path.lower().endswith(".sas") or path.lower().endswith(".sas7bdat")
+        is_ps1 = path.lower().endswith(".ps1")
         act_adobe = act_browser = None
         act_sas_eg = act_sas_vscode = act_default_eg = act_default_vscode = None
+        act_ps1_run = None
+        if is_ps1:
+            act_ps1_run = menu.addAction("用PowerShell运行")
         if is_pdf:
             act_adobe = menu.addAction("用 Adobe Acrobat 打开")
             act_browser = menu.addAction("用浏览器打开")
@@ -2465,6 +2901,19 @@ class QtMainWindow(QMainWindow):
         act_open_folder = menu.addAction("打开所在文件夹")
         act_open_folder.setData((path, typ))
         act_copy_path = menu.addAction("复制路径")
+        act_copy_files = menu.addAction("复制选中文件")
+        act_delete_files = None
+        if typ == "file":
+            act_delete_files = menu.addAction("删除选中文件")
+        target_dir = path if os.path.isdir(path) else os.path.dirname(path)
+        act_paste = None
+        if target_dir and os.path.isdir(target_dir) and self._check_clipboard_has_files():
+            act_paste = menu.addAction("粘贴")
+            act_paste.setData(target_dir)
+        act_refresh_folder = None
+        if typ in ("ok", "dir", "unavailable") and path and os.path.isdir(path):
+            act_refresh_folder = menu.addAction("刷新")
+            act_refresh_folder.setData(path)
         act = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if act == act_open_folder:
             path_typ = act_open_folder.data()
@@ -2477,6 +2926,16 @@ class QtMainWindow(QMainWindow):
         elif act == act_copy_path:
             clipboard = QGuiApplication.clipboard()
             clipboard.setText(path)
+        elif act == act_copy_files:
+            self._copy_selected_files()
+        elif act_delete_files and act == act_delete_files:
+            self._delete_selected_files()
+        elif act_paste and act == act_paste:
+            self._paste_files_to_folder(act_paste.data())
+        elif act_refresh_folder and act == act_refresh_folder:
+            self._refresh_folder_node(act_refresh_folder.data(), item)
+        elif is_ps1 and act == act_ps1_run:
+            self._run_ps1_file(path)
         elif is_pdf and act == act_adobe:
             ok, err = self.core.open_pdf_with_adobe(path)
             if ok:
@@ -2513,7 +2972,314 @@ class QtMainWindow(QMainWindow):
         elif is_sas and act == act_default_vscode:
             self.core.config.set_sas_open(default_app="vscode")
             self.statusBar().showMessage("默认打开方式已设为 VS Code，生效于本次及之后打开", 3000)
-    
+
+    def _set_clipboard_files_win(self, file_paths):
+        """将文件路径以 CF_HDROP 格式写入系统剪贴板，使资源管理器或本工具中「粘贴」可复制文件。仅 Windows。"""
+        if sys.platform != "win32" or not file_paths:
+            return False
+        # DROPFILES: pFiles(4) pt(8) fNC(4) fWide(4)=20 字节，其后为以双字节 null 结尾的 UTF-16LE 路径列表
+        CF_HDROP = 15
+        GMEM_MOVEABLE = 0x0002
+        paths_utf16 = []
+        for p in file_paths:
+            p = os.path.normpath(p).replace("/", "\\")
+            paths_utf16.append(p.encode("utf-16-le") + b"\x00\x00")
+        block = b"".join(paths_utf16) + b"\x00\x00"
+        drop_offset = 20
+        size = drop_offset + len(block)
+        header = struct.pack("IllII", drop_offset, 0, 0, 0, 1)
+        kernel32 = ctypes.windll.kernel32
+        user32 = ctypes.windll.user32
+        h = kernel32.GlobalAlloc(GMEM_MOVEABLE, size)
+        if not h:
+            return False
+        try:
+            ptr = kernel32.GlobalLock(h)
+            if not ptr:
+                return False
+            buf = (ctypes.c_char * size).from_address(ptr)
+            ctypes.memmove(buf, header, drop_offset)
+            ctypes.memmove(ctypes.byref(buf, drop_offset), block, len(block))
+            kernel32.GlobalUnlock(h)
+            if not user32.OpenClipboard(None):
+                return False
+            try:
+                user32.EmptyClipboard()
+                user32.SetClipboardData(CF_HDROP, h)
+                return True
+            finally:
+                user32.CloseClipboard()
+        except Exception:
+            try:
+                kernel32.GlobalFree(h)
+            except Exception:
+                pass
+            return False
+
+    def _copy_selected_files(self):
+        """将选中的文件写入系统剪贴板，可在本工具选中文件夹后粘贴或资源管理器中粘贴以复制文件。"""
+        selected = self.tree.selectedItems()
+        file_paths = []
+        for it in selected:
+            p = it.data(0, Qt.ItemDataRole.UserRole)
+            t = it.data(1, Qt.ItemDataRole.UserRole)
+            if p and t == "file" and isinstance(p, str) and os.path.isfile(p):
+                p = os.path.normpath(p).replace("/", "\\")
+                if p not in file_paths:
+                    file_paths.append(p)
+        if not file_paths:
+            QMessageBox.warning(self, "提示", "请先选中要复制的文件（可按住 Ctrl 多选）。")
+            return
+        if sys.platform == "win32":
+            if self._set_clipboard_files_win(file_paths):
+                self.statusBar().showMessage(f"已复制 {len(file_paths)} 个文件到剪贴板，可在目标文件夹中粘贴（Ctrl+V）", 4000)
+            else:
+                clipboard = QGuiApplication.clipboard()
+                clipboard.setText("\n".join(file_paths))
+                self.statusBar().showMessage(f"已将 {len(file_paths)} 个文件路径写入剪贴板（文本）", 4000)
+        else:
+            clipboard = QGuiApplication.clipboard()
+            clipboard.setText("\n".join(file_paths))
+            self.statusBar().showMessage(f"已将 {len(file_paths)} 个文件路径写入剪贴板", 4000)
+
+    def _check_clipboard_has_files(self):
+        """仅当剪贴板中解析出至少 1 个有效文件路径时返回 True；决定是否显示「粘贴」。
+        支持两种来源：CF_HDROP（优先）或文本中的文件路径。"""
+        paths = self._get_clipboard_file_paths()
+        return len(paths) > 0
+
+    def _get_clipboard_file_paths(self):
+        """从系统剪贴板读取待粘贴的文件路径列表。Windows 下优先解析 CF_HDROP，否则用剪贴板文本。"""
+        paths = []
+        if sys.platform == "win32":
+            paths = self._get_clipboard_file_paths_win()
+        if not paths:
+            clipboard = QGuiApplication.clipboard()
+            text = (clipboard.text() or "").strip()
+            for line in text.replace("\r\n", "\n").replace("\r", "\n").split("\n"):
+                p = line.strip().strip('"')
+                if p and os.path.isfile(p):
+                    p = os.path.normpath(p).replace("/", "\\")
+                    if p not in paths:
+                        paths.append(p)
+        return paths
+
+    def _get_clipboard_file_paths_win(self):
+        """从 Windows 剪贴板 CF_HDROP 读取文件路径列表。"""
+        if sys.platform != "win32":
+            return []
+        CF_HDROP = 15
+        user32 = ctypes.windll.user32
+        kernel32 = ctypes.windll.kernel32
+        if not user32.OpenClipboard(None):
+            return []
+        try:
+            h = user32.GetClipboardData(CF_HDROP)
+            if not h:
+                return []
+            ptr = kernel32.GlobalLock(h)
+            if not ptr:
+                return []
+            try:
+                drop_offset = struct.unpack_from("I", ctypes.string_at(ptr, 4), 0)[0]
+                f_wide = struct.unpack_from("I", ctypes.string_at(ptr, 24), 16)[0]
+                data = ctypes.string_at(ptr + drop_offset)
+                kernel32.GlobalUnlock(h)
+            except Exception:
+                kernel32.GlobalUnlock(h)
+                return []
+            if not data:
+                return []
+            paths = []
+            if f_wide:
+                pos = 0
+                while pos < len(data) - 1:
+                    end = data.find(b"\x00\x00", pos)
+                    if end == -1:
+                        break
+                    chunk = data[pos:end]
+                    pos = end + 2
+                    if chunk:
+                        try:
+                            s = chunk.decode("utf-16-le")
+                            if s and os.path.isfile(s):
+                                s = os.path.normpath(s).replace("/", "\\")
+                                if s not in paths:
+                                    paths.append(s)
+                        except Exception:
+                            pass
+            return paths
+        finally:
+            user32.CloseClipboard()
+
+    def _paste_files_to_folder(self, target_dir):
+        """将剪贴板中的文件粘贴（复制）到 target_dir，同名自动加数字后缀，完成后刷新右侧树。"""
+        target_dir = os.path.normpath(target_dir).replace("/", "\\")
+        if not os.path.isdir(target_dir):
+            QMessageBox.warning(self, "提示", "目标不是有效文件夹。")
+            return
+        paths = self._get_clipboard_file_paths()
+        if not paths:
+            QMessageBox.information(self, "提示", "剪贴板中没有可粘贴的文件。请先用「复制选中文件」复制文件。")
+            return
+        success = 0
+        fail_list = []
+        for src in paths:
+            try:
+                name = os.path.basename(src)
+                dest = os.path.join(target_dir, name)
+                if os.path.exists(dest):
+                    base, ext = os.path.splitext(name)
+                    n = 1
+                    while os.path.exists(os.path.join(target_dir, f"{base}_{n}{ext}")):
+                        n += 1
+                    dest = os.path.join(target_dir, f"{base}_{n}{ext}")
+                shutil.copy2(src, dest)
+                success += 1
+            except Exception as e:
+                fail_list.append(f"{os.path.basename(src)}: {e}")
+        msg = f"粘贴完成。成功：{success} 个" + (f"，失败：{len(fail_list)} 个" if fail_list else "。")
+        if fail_list:
+            msg += "\n失败：\n" + "\n".join(fail_list[:15])
+            if len(fail_list) > 15:
+                msg += f"\n…共 {len(fail_list)} 个"
+        self.statusBar().showMessage(msg, 5000)
+        QMessageBox.information(self, "粘贴结果", msg)
+        if success > 0 and self.current_fav:
+            self._refresh_tree()
+
+    def _delete_selected_files(self):
+        """删除右侧文件树中选中的文件（仅 file 类型），操作前确认，删除后刷新当前项目。"""
+        selected = self.tree.selectedItems()
+        file_paths = []
+        for it in selected:
+            p = it.data(0, Qt.ItemDataRole.UserRole)
+            t = it.data(1, Qt.ItemDataRole.UserRole)
+            if p and t == "file" and isinstance(p, str):
+                p = os.path.normpath(p).replace("/", "\\")
+                if p not in file_paths and os.path.isfile(p):
+                    file_paths.append(p)
+        if not file_paths:
+            QMessageBox.information(self, "提示", "请选择要删除的文件（仅支持删除文件，不删除文件夹）。")
+            return
+        names_preview = "\n".join(os.path.basename(p) for p in file_paths[:10])
+        if len(file_paths) > 10:
+            names_preview += f"\n… 共 {len(file_paths)} 个文件"
+        r = QMessageBox.question(
+            self,
+            "确认删除",
+            f"确定要删除以下文件吗？\n\n{names_preview}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if r != QMessageBox.StandardButton.Yes:
+            return
+        success = 0
+        failed = []
+        for p in file_paths:
+            try:
+                os.remove(p)
+                success += 1
+            except Exception as e:
+                failed.append(f"{os.path.basename(p)}: {e}")
+        msg = f"删除完成。成功：{success} 个" + (f"，失败：{len(failed)} 个" if failed else "。")
+        if failed:
+            msg += "\n失败：\n" + "\n".join(failed[:15])
+        self.statusBar().showMessage(msg, 5000)
+        QMessageBox.information(self, "删除结果", msg)
+        if self.current_fav:
+            self._refresh_tree()
+
+    def _run_ps1_file(self, path):
+        """用 PowerShell 执行 .ps1 文件：弹出控制台窗口，执行后窗口保持打开（-NoExit），便于查看结果与错误。"""
+        path = os.path.normpath(path).replace("/", "\\")
+        if not os.path.isfile(path):
+            QMessageBox.warning(self, "提示", "脚本文件不存在或无法访问。")
+            return
+        name = os.path.basename(path)
+        try:
+            subprocess.Popen(
+                [
+                    "powershell.exe",
+                    "-NoExit",
+                    "-File", path,
+                ],
+                creationflags=subprocess.CREATE_NEW_CONSOLE if sys.platform == "win32" else 0,
+                cwd=os.path.dirname(path),
+            )
+            self.statusBar().showMessage(f"已启动 PowerShell 窗口运行：{name}", 3000)
+        except FileNotFoundError:
+            QMessageBox.warning(self, "PowerShell 运行", "未找到 PowerShell，请确认系统已安装 PowerShell。")
+        except PermissionError:
+            QMessageBox.warning(self, "PowerShell 运行", "权限不足，请尝试以管理员身份运行本程序或 PowerShell。")
+        except Exception as e:
+            QMessageBox.warning(self, "PowerShell 运行", f"启动失败：{e}")
+
+    def _refresh_folder_node(self, folder_path, item):
+        """刷新文件夹节点：清空子节点、显示加载中、后台扫描后更新树。"""
+        folder_path = os.path.normpath(folder_path).replace("/", "\\")
+        if not os.path.isdir(folder_path):
+            QMessageBox.warning(self, "提示", "目标不是有效文件夹或无法访问。")
+            return
+        while item.childCount():
+            item.removeChild(item.child(0))
+        loading = QTreeWidgetItem(["加载中…", ""])
+        loading.setData(0, Qt.ItemDataRole.UserRole, None)
+        item.addChild(loading)
+        item.setExpanded(True)
+
+        def scan():
+            try:
+                names = sorted(os.listdir(folder_path))
+                err = None
+            except Exception as e:
+                names = []
+                err = str(e)
+            result = []
+            for n in names:
+                p = os.path.join(folder_path, n)
+                try:
+                    is_dir = os.path.isdir(p)
+                except Exception:
+                    continue
+                result.append((n, p, is_dir))
+
+            def apply(err=err, result=result):
+                while item.childCount():
+                    item.removeChild(item.child(0))
+                if err:
+                    QMessageBox.warning(self, "刷新失败", f"刷新失败：{err}")
+                    ph = QTreeWidgetItem(["...", ""])
+                    ph.setData(0, Qt.ItemDataRole.UserRole, None)
+                    item.addChild(ph)
+                    return
+                for n, p, is_dir in result:
+                    display = _strip_prefix(n)
+                    if is_dir:
+                        c = QTreeWidgetItem([display, ""])
+                        c.setData(0, Qt.ItemDataRole.UserRole, p)
+                        c.setData(1, Qt.ItemDataRole.UserRole, "dir")
+                        c.setToolTip(0, p)
+                        c.setIcon(0, icon_folder_yellow())
+                        ph = QTreeWidgetItem(["...", ""])
+                        ph.setData(0, Qt.ItemDataRole.UserRole, None)
+                        c.addChild(ph)
+                        item.addChild(c)
+                    else:
+                        mtime = _mtime_str(p)
+                        c = QTreeWidgetItem([display, mtime])
+                        c.setData(0, Qt.ItemDataRole.UserRole, p)
+                        c.setData(1, Qt.ItemDataRole.UserRole, "file")
+                        c.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+                        c.setToolTip(0, p)
+                        c.setIcon(0, icon_for_file_soft(p, 14))
+                        item.addChild(c)
+                self.statusBar().showMessage("刷新完成", 2000)
+
+            QTimer.singleShot(0, apply)
+
+        threading.Thread(target=scan, daemon=True).start()
+
     def _show_pywin32_hint_if_needed(self):
         """若因未安装 pywin32 未能解析 .lnk，则提示用户安装（仅提示一次）。"""
         if getattr(self.core, "_sas_eg_pywin32_missing", False):
@@ -2558,6 +3324,36 @@ class ProjectSelector(QDialog):
     
     def _build_ui(self):
         layout = QVBoxLayout(self)
+        # 顶部搜索栏 + 扁平下拉（与左侧收藏库一致）
+        self.search_edit = QLineEdit()
+        self.search_edit.setPlaceholderText("搜索项目路径")
+        self.search_edit.setClearButtonEnabled(True)
+        self.search_edit.setFixedHeight(26)
+        self.search_edit.setStyleSheet(
+            "QLineEdit{border:1px solid #D0D3D8; border-radius:4px; padding:2px 8px; font-size:11px;}"
+            "QLineEdit:focus{border-color:#165DFF;}"
+        )
+        layout.addWidget(self.search_edit)
+
+        self.search_list = QListWidget(self)
+        self.search_list.setWindowFlags(Qt.WindowType.SubWindow)
+        self.search_list.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.search_list.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self.search_list.setMaximumHeight(8 * 25)
+        self.search_list.setUniformItemSizes(True)
+        self.search_list.setSelectionMode(QAbstractItemView.SelectionMode.SingleSelection)
+        self.search_list.setStyleSheet(
+            "QListWidget{background:rgba(255,255,255,217); border:1px solid #D0D3D8; font-size:9px; outline:none;}"
+            "QListWidget::item{padding:2px 6px; border:none; outline:none;}"
+            "QListWidget::item:focus, QListWidget::item:hover{outline:none; border:none;}"
+            "QListWidget::item:selected{background:#E8F3FF; color:#165DFF; outline:none; border:none;}"
+            "QScrollBar:vertical{width:8px;}"
+        )
+        self.search_list.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        if self.search_list.viewport():
+            self.search_list.viewport().setFocusPolicy(Qt.FocusPolicy.NoFocus)
+        self.search_list.hide()
+
         self.tree = QTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -2594,6 +3390,137 @@ class ProjectSelector(QDialog):
         if projects_item:
             self.tree.expandItem(projects_item)
             self._on_expand(projects_item)
+
+        self._search_index = []
+        self.search_edit.textChanged.connect(self._on_search_changed)
+        self.search_edit.installEventFilter(self)
+        self.search_list.itemClicked.connect(self._on_search_item_clicked)
+        self._rebuild_search_index()
+
+    def _normalize_search_text(self, s: str) -> str:
+        s = (s or "").strip().lower()
+        return re.sub(r"[\s_\-\\/]+", "", s)
+
+    def _rebuild_search_index(self):
+        """把当前已加载的树节点扁平化为 [(flat, path, item)]，用于快速搜索定位。"""
+        out = []
+
+        def flat_path_for_item(it: QTreeWidgetItem) -> str:
+            parts = []
+            cur = it
+            while cur is not None:
+                t = (cur.text(0) or "").strip()
+                if t:
+                    parts.insert(0, t)
+                cur = cur.parent()
+            return "/".join(parts)
+
+        def walk(it: QTreeWidgetItem):
+            p = it.data(0, Qt.ItemDataRole.UserRole)
+            if p:
+                out.append((flat_path_for_item(it), os.path.normpath(str(p)).replace("/", "\\"), it))
+            for i in range(it.childCount()):
+                walk(it.child(i))
+
+        for i in range(self.tree.topLevelItemCount()):
+            walk(self.tree.topLevelItem(i))
+        self._search_index = out
+
+    def _position_search_list(self):
+        x = self.search_edit.x()
+        y = self.search_edit.y() + self.search_edit.height()
+        w = self.search_edit.width()
+        rows = min(self.search_list.count(), 8)
+        h = max(1, rows) * 25 + 2
+        self.search_list.setGeometry(x, y, w, h)
+        self.search_list.raise_()
+
+    def _hide_search_list(self):
+        if self.search_list.isVisible():
+            self.search_list.hide()
+
+    def _on_search_changed(self, text: str):
+        q = self._normalize_search_text(text)
+        if not q:
+            self.search_list.clear()
+            self._hide_search_list()
+            return
+        # 索引可能因为展开而变化
+        if not self._search_index:
+            self._rebuild_search_index()
+        matches = []
+        for flat, p, it in self._search_index:
+            if q in self._normalize_search_text(flat):
+                matches.append((flat, p, it))
+        self.search_list.clear()
+        if not matches:
+            self._hide_search_list()
+            return
+        matches = matches[:200]
+        q_raw = (text or "").strip().lower()
+        for flat, p, it_ref in matches:
+            it = QListWidgetItem()
+            it.setData(Qt.ItemDataRole.UserRole, {"path": p, "tree_item": it_ref})
+            safe = html.escape(flat)
+            raw_lower = flat.lower()
+            idx = raw_lower.find(q_raw) if q_raw else -1
+            if idx >= 0 and q_raw:
+                before = html.escape(flat[:idx])
+                mid = html.escape(flat[idx : idx + len(q_raw)])
+                after = html.escape(flat[idx + len(q_raw) :])
+                rich = f"{before}<span style='color:#FF4444;'>{mid}</span>{after}"
+            else:
+                rich = safe
+            lbl = QLabel()
+            lbl.setTextFormat(Qt.TextFormat.RichText)
+            lbl.setStyleSheet("background:transparent; border:none; outline:none;")
+            lbl.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            lbl.setText(rich)
+            lbl.setToolTip(p)
+            self.search_list.addItem(it)
+            it.setSizeHint(QSize(10, 23))
+            self.search_list.setItemWidget(it, lbl)
+        self._position_search_list()
+        self.search_list.setCurrentRow(0)
+        self.search_list.show()
+
+    def _on_search_item_clicked(self, item):
+        payload = item.data(Qt.ItemDataRole.UserRole) or {}
+        tree_item = payload.get("tree_item")
+        self._hide_search_list()
+        if tree_item:
+            # 展开所有父节点并定位
+            cur = tree_item.parent()
+            while cur is not None:
+                cur.setExpanded(True)
+                cur = cur.parent()
+            self.tree.setCurrentItem(tree_item)
+            self.tree.scrollToItem(tree_item)
+
+    def eventFilter(self, obj, event):
+        if obj is getattr(self, "search_edit", None):
+            if event.type() == QEvent.Type.KeyPress:
+                if event.key() in (Qt.Key.Key_Down, Qt.Key.Key_Up):
+                    if self.search_list.isVisible() and self.search_list.count() > 0:
+                        row = self.search_list.currentRow()
+                        if event.key() == Qt.Key.Key_Down:
+                            row = 0 if row < 0 else min(row + 1, self.search_list.count() - 1)
+                        else:
+                            row = self.search_list.count() - 1 if row < 0 else max(row - 1, 0)
+                        self.search_list.setCurrentRow(row)
+                        return True
+                if event.key() == Qt.Key.Key_Return or event.key() == Qt.Key.Key_Enter:
+                    it = self.search_list.currentItem()
+                    if it:
+                        self._on_search_item_clicked(it)
+                        return True
+                if event.key() == Qt.Key.Key_Escape:
+                    self.search_edit.clear()
+                    self._hide_search_list()
+                    return True
+            elif event.type() == QEvent.Type.FocusOut:
+                QTimer.singleShot(150, self._hide_search_list)
+        return super().eventFilter(obj, event)
     
     def _on_expand(self, item):
         children = [item.child(i) for i in range(item.childCount())]
@@ -2609,6 +3536,8 @@ class ProjectSelector(QDialog):
                     ph = QTreeWidgetItem(["Loading..."])
                     ph.setData(0, Qt.ItemDataRole.UserRole, None)
                     n.addChild(ph)
+        # 节点变化后刷新索引，保证搜索结果实时
+        QTimer.singleShot(0, self._rebuild_search_index)
     
     def _project_from_path(self, path):
         """从路径构建 project 字典；projects/unblinded 按 产品→试验→子目录 解析以便正确归类。"""

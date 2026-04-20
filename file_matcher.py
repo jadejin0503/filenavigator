@@ -138,7 +138,7 @@ class FileMatcher:
                 m = os.path.getmtime(f)
             except Exception:
                 m = 0
-            if latest is None or m > latest_mtime:
+            if latest is None or (latest_mtime is not None and m > latest_mtime):
                 latest = f
                 latest_mtime = m
         return latest

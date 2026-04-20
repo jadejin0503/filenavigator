@@ -105,6 +105,28 @@ class ConfigManager:
     
     def get_fixed_paths(self):
         return self.data.get("fixed_paths", [])
+
+    def get_documentation_paths(self):
+        """返回 documentation_paths 配置：common 常用项列表，scan_root、documentation_scan_path 扫描路径。"""
+        d = self.data.get("documentation_paths") or {}
+        if not isinstance(d, dict):
+            return {"common": [], "scan_root": "", "documentation_scan_path": ""}
+        return {
+            "common": d.get("common") or [],
+            "scan_root": (d.get("scan_root") or "").strip(),
+            "documentation_scan_path": (d.get("documentation_scan_path") or self.data.get("documentation_scan_path") or "").strip(),
+        }
+
+    def set_documentation_paths(self, common=None, scan_root=None, documentation_scan_path=None):
+        if "documentation_paths" not in self.data or not isinstance(self.data["documentation_paths"], dict):
+            self.data["documentation_paths"] = {"common": [], "scan_root": "", "documentation_scan_path": ""}
+        if common is not None:
+            self.data["documentation_paths"]["common"] = common
+        if scan_root is not None:
+            self.data["documentation_paths"]["scan_root"] = str(scan_root).strip()
+        if documentation_scan_path is not None:
+            self.data["documentation_paths"]["documentation_scan_path"] = str(documentation_scan_path).strip()
+        self.save()
     
     def set_fixed_paths(self, paths):
         self.data["fixed_paths"] = paths
@@ -262,5 +284,19 @@ class ConfigManager:
             if not any("07_logs" in p or "logs" in p for p in fps):
                 fps.append("07_logs")
                 self.data["fixed_paths"] = fps
-            
+
+        if "documentation_paths" not in self.data:
+            self.data["documentation_paths"] = {
+                "common": ["setup.xlsx", "SDTM_PDS", "ADAM_PDS", "PDT", "QCT", "PIT"],
+                "scan_root": "",
+                "documentation_scan_path": "",
+            }
+        elif isinstance(self.data["documentation_paths"], dict):
+            if "common" not in self.data["documentation_paths"]:
+                self.data["documentation_paths"]["common"] = ["setup.xlsx", "SDTM_PDS", "ADAM_PDS", "PDT", "QCT", "PIT"]
+            if "scan_root" not in self.data["documentation_paths"]:
+                self.data["documentation_paths"]["scan_root"] = ""
+            if "documentation_scan_path" not in self.data["documentation_paths"]:
+                self.data["documentation_paths"]["documentation_scan_path"] = ""
+
         self.save()

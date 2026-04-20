@@ -257,6 +257,36 @@
       "display_name": "HRS7450_201 (csr_01)",
       "full_path": "Z:\\users\\jinx33\\unblinded\\HRS7450\\HRS7450_201\\csr_01",
       "dir_type": "users-jinx33-unblinded"
+    },
+    {
+      "id": "users_jinx33_projects_SHR6934_SHR6934_101_csr_01",
+      "display_name": "SHR6934_101 (csr_01)",
+      "full_path": "Z:\\users\\jinx33\\projects\\SHR6934\\SHR6934_101\\csr_01",
+      "dir_type": "users-jinx33-projects"
+    },
+    {
+      "id": "users_jinx33_projects_HRS1301_dsur_dsur_01",
+      "display_name": "dsur (dsur_01)",
+      "full_path": "Z:\\users\\jinx33\\projects\\HRS1301\\dsur\\dsur_01",
+      "dir_type": "users-jinx33-projects"
+    },
+    {
+      "id": "users_jinx33_projects_HRS1301_HRS1301_101_csr_01",
+      "display_name": "HRS1301_101 (csr_01)",
+      "full_path": "Z:\\users\\jinx33\\projects\\HRS1301\\HRS1301_101\\csr_01",
+      "dir_type": "users-jinx33-projects"
+    },
+    {
+      "id": "projects_HRS5765_HRS5765_101_csr_01",
+      "display_name": "HRS5765_101 (csr_01)",
+      "full_path": "Z:\\projects\\HRS5765\\HRS5765_101\\csr_01",
+      "dir_type": "projects"
+    },
+    {
+      "id": "projects_SHR2004_SHR2004_101_csr_02",
+      "display_name": "SHR2004_101 (csr_02)",
+      "full_path": "Z:\\projects\\SHR2004\\SHR2004_101\\csr_02",
+      "dir_type": "projects"
     }
   ],
   "match_rules": {
