@@ -10,9 +10,16 @@ __pycache__/
 /dist/
 /build/build/
 
-# Keep only the main shipped exe under PFN_app/
-/PFN_app/*.exe
-!/PFN_app/PFN.exe
+# Build output folder (never commit)
+/PFN_app/
+
+# Runtime artifacts
+pfn_app.lock
+debug.log
+
+# Local build/generated files
+icon.ico
+main.spec
 
 # Cursor local skill cache (repo-specific rules can still be committed)
 /.cursor/skills/

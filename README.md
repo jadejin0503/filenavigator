@@ -8,14 +8,16 @@
 
 | 模块 | 说明 |
 |------|------|
-| **项目管理栏** | 左侧树：按 projects / unblinded / users 分类，支持「产品 → 试验 → 子目录」层级；支持添加、删除、打开所在文件夹；标题区可切回待办/分析。 |
+| **项目管理栏** | 左侧树：按 projects / unblinded / users 分类；支持「产品 → 试验 → 子目录」层级、搜索定位、添加/删除、打开所在文件夹；标题区可切回待办/分析。 |
 | **右侧视图** | 无左侧选中：显示「我的待办 / 项目数据分析」；有选中且可解析为收藏目录：显示文件树。见下文「归类规则」。 |
 | **右侧文件树** | 对**收藏项**（`config` 中有对应记录）展示按项目类型归类的聚合目录；支持双击/右键打开、显示修改时间。 |
-| **添加项目** | 从 Z 盘树中多选子目录，自动解析为产品/试验并加入收藏；支持覆盖/跳过已存在路径。 |
+| **添加项目** | 对话框支持三目录（projects / unblinded / users）按**产品**搜索与快速定位；可多选目录并自动解析为产品/试验加入收藏；支持覆盖/跳过已存在路径。 |
 | **SAS EG 集成** | .sas 与 SAS 数据集（.sas7bdat/.sas7bndx/.sas7bcat/.sd2）差异化打开：`.sas` 走 EG 自动化展开；数据集直接调用 `SEGuide.exe` 传参打开。 |
 | **代码/文档打开** | `.sas` 保留 SAS EG / VS Code；SAS 数据集仅 SAS EG；PDF 可选默认查看器。 |
 | **Utility 公共目录** | 左侧固定入口，点击后在右侧展示 `Z:\projects\utility` 目录树。 |
-| **配置与规则** | 配置文件 `config.json`；内置匹配规则（aCRF、protocol、SAP、shell、顶线、setup 等）可扩展。 |
+| **工作台（工具入口）** | 项目管理页内置工作台卡片（如 PDTManager/QCT_Tools/RTFtoPDF），启动时按规则扫描固定目录并选择最新 exe。 |
+| **配置与规则** | 配置文件 `config.json`（自动创建、带回退优先级）；内置匹配规则（aCRF、protocol、SAP、shell、顶线、setup 等）可扩展。 |
+| **单文件分发** | Windows 打包产物为单文件 `PFN.exe`（PyInstaller onefile），可复制到任意路径运行；任务栏图标优先读取同目录 `icon.ico`，无则回退内嵌/PE 图标。 |
 
 ---
 
@@ -124,11 +126,7 @@ python app_qt.py
 
 ### 打包为单文件 exe（Windows）
 
-```bash
-pyinstaller build.spec
-```
-
-生成无控制台窗口的 `dist/PFN.exe`。
+在项目根目录执行 **`build.bat`**（或 `pyinstaller build.spec`），生成 **`PFN_app\PFN.exe`**：无控制台、单文件可任意路径运行。建议将同目录下的 **`icon.ico`** 一并分发给对方（脚本会自动复制到 `PFN_app\`）。
 
 ### config.json 查找优先级（适配「仅复制 exe 到桌面」）
 
@@ -137,11 +135,13 @@ pyinstaller build.spec
 | 优先级 | 位置 | 说明 |
 |--------|------|------|
 | 1 | **程序运行目录**（exe 所在目录）的 `config.json` | 与原有逻辑一致；若把 exe 和 config 放同一文件夹，优先用这份。 |
-| 2 | **上次使用过的 config 所在目录** | 程序会记住「上次读到的 config 在哪个目录」（记在 `%APPDATA%\PFN\pfn_config_dir.txt`）。把 exe 单独复制到桌面后，若运行目录没有 config，会自动去该目录找（通常是 dist 或项目目录），收藏不丢失。 |
+| 2 | **上次使用过的 config 所在目录** | 程序会记住「上次读到的 config 在哪个目录」（记在 `%APPDATA%\PFN\pfn_config_dir.txt`）。把 exe 单独复制到桌面后，若运行目录没有 config，会自动去该目录找（通常是 `PFN_app` 或项目目录），收藏不丢失。 |
 | 3 | **C:\Users\\<当前用户名>\PFN_Config\config.json** | 若 1、2 都没有，则在此创建空配置；新用户添加的项目会保存在这里。 |
 
-- **本机：复制 exe 到桌面** → 先在 **dist**（或带 config 的目录）运行一次 PFN.exe，再只把 **PFN.exe** 拷到桌面；之后点桌面的 exe，会自动用 dist 里的 config，项目不会丢。若希望桌面单独一份配置，可在桌面建文件夹并放入 **PFN.exe + config.json**，则优先用桌面这份。
-- **发给别人** → 只发 **PFN.exe** 一个文件；对方电脑没有「上次使用目录」记录，会走优先级 3，在对方 `C:\Users\<对方用户名>\PFN_Config\` 下生成空配置，**不会看到你的项目**。
+- **本机：复制 exe 到桌面** → 先在 **`PFN_app`**（或带 config 的目录）运行一次 PFN.exe，再只把 **PFN.exe** 拷到桌面；之后点桌面的 exe，会自动用原目录里的 config，项目不会丢。若希望桌面单独一份配置，可在桌面建文件夹并放入 **PFN.exe + config.json**，则优先用桌面这份。
+- **发给别人**：
+  - 只发 **PFN.exe** 一个文件 → 对方会走优先级 3，在其 `C:\Users\<对方用户名>\PFN_Config\config.json` 下生成空配置，**不会看到你的项目**。
+  - 若同时把你的 **config.json** 与 exe 放同一目录一起发 → 对方会走优先级 1，**直接使用你提供的配置**（等同带走你的收藏与设置）。
 
 ---
 
@@ -149,12 +149,20 @@ pyinstaller build.spec
 
 | 文件 | 说明 |
 |------|------|
-| `app_qt.py` | 主界面与业务逻辑：收藏树、右侧文件树、添加项目、SAS EG 自动化、打开方式选择与右键菜单等。 |
-| `config_manager.py` | 配置读写：收藏、匹配规则、固定路径、SAS 打开方式；开发/打包不同 config 路径。 |
-| `zdrive_scanner.py` | Z 盘扫描：根目录 projects/unblinded/users，users 下 userid → projects/unblinded 的懒加载与 source_id。 |
-| `file_matcher.py` | 按 match_rules 在项目路径下匹配文档（aCRF、protocol、SAP、shell、顶线、setup 等）。 |
-| `icons_pfn.py` | 图标资源。 |
-| `build.spec` | PyInstaller 配置，单 exe、无控制台、不打包 config。 |
+| `main.py` | 程序入口：AppUserModelID、单实例锁（`pfn_app.lock`）、应用/窗口图标与 Win32 `WM_SETICON` 补强。 |
+| `PFN_silent.pyw` | Windows 静默入口（pythonw/.pyw），避免控制台窗口闪烁。 |
+| `app_qt.py` | 主界面与业务逻辑：收藏树、右侧文件树、添加项目对话框与搜索、SAS EG 自动化、右键菜单等。 |
+| `config_manager.py` | 配置读写：收藏、匹配规则、固定路径、SAS 打开方式；`config.json` 多级回退路径。 |
+| `zdrive_scanner.py` | Z 盘懒加载扫描：projects/unblinded/users，users 下 userid → projects/unblinded 的 source_id 计算。 |
+| `file_matcher.py` | 按 match_rules 匹配项目文档（aCRF、protocol、SAP、shell、顶线、setup 等）。 |
+| `workbench_launcher.py` | 工作台工具启动辅助：缓存/扫描 exe、Windows 静默启动参数等。 |
+| `icons_pfn.py` | UI 图标绘制/加载（文件夹、勾选等）。 |
+| `build.bat` | Windows 一键构建脚本（ASCII-only），输出 `PFN_app\PFN.exe`。 |
+| `build.spec` | PyInstaller **单文件（onefile）** spec：生成 `PFN.exe`（无控制台），包含 `assets/app_icon.ico`。 |
+| `assets/` | `app_icon.ico`、分发说明 `DISTRIBUTION_zh.txt`、logo 源图等。 |
+| `scripts/build_app_icon_from_png.py` | 从 PNG 生成 ICO（用于构建时同步 `icon.ico`）。 |
+| `tests/test_workbench_launcher.py` | 工作台启动辅助的单元测试。 |
+| `.cursor/rules/` | Cursor 规则：项目约定、工作台约定、UI 负载安全等。 |
 | `SAS_EG_集成与调试说明.md` | SAS EG 集成与调试说明（路径转换、树展开、常见问题）。 |
 
 ---

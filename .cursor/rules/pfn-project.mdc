@@ -98,19 +98,29 @@ alwaysApply: true
 ### 3. 配置管理（解决分发/适配痛点）
 #### 3.1 配置加载规则（强制）
 - ✅ `config.json` 查找优先级（按顺序）：
-  1. 程序运行目录 → 2. 保存的配置目录 → 3. `os.path.expandvars("%APPDATA%/PFN")`
+  1. 程序运行目录 → 2. 上次使用过的 config 所在目录（`%APPDATA%\PFN\pfn_config_dir.txt` 记录）→ 3. `C:\Users\<当前用户>\PFN_Config\config.json`（不存在则创建空配置）
 - ✅ 配置加载失败时，自动生成「干净的默认配置」，并提示用户：`"配置文件丢失，已生成默认配置，请重新设置路径"`；
 - ✅ 配置项校验：加载配置后必须校验关键项（如SAS EG路径、Z盘根目录），缺失项标记为未配置并引导用户补充；
 - ✅ 配置备份：修改配置时自动备份旧配置为 `config.backup.json`，保留最近3个版本。
+ - ✅ **分发给新用户**：若仅分发 `PFN.exe`（不附带 `config.json`），对方首次运行会在其机器的 `C:\Users\<对方用户名>\PFN_Config\config.json` 生成并保存收藏；若随 exe 一并分发 `config.json`，则对方会直接使用该配置（等同“带走你的收藏”）。
 
 #### 3.2 打包规范（解决分发问题）
-- ✅ 打包EXE时，通过 `pyinstaller` 的 `--exclude-data-files config.json` 排除开发者个人配置；
-- ✅ 打包命令模板（强制）：
-  ```bash
-  pyinstaller -F -w --name PFN --exclude-data-files config.json --add-data "assets;assets" app_qt.py
-  ```
+- ✅ **唯一入口**：Windows 发布构建使用仓库根目录 **`build.bat`**（内部调用 `pyinstaller build.spec`），产出 **`PFN_app\PFN.exe`** 单文件；不得再引入独立 onedir spec 或绕过 `main.py` 作为 Analysis 入口。
+- ✅ 打包时不将开发者个人 `config.json` 打入 exe；分发用干净配置由程序首次运行生成。
 - ✅ 打包后必须验证：新环境运行EXE时，自动生成空白 `config.json`，无硬编码的开发者路径；
 - ✅ 打包产物规范：EXE文件必须包含版本信息、开发者信息、版权声明，通过 `pyinstaller` 的 `--version-file` 配置。
+
+#### 3.2.1 Windows 图标与任务栏（强制，保证打包后 logo 一致）
+- ✅ **PE / 外壳图标（资源管理器里的 `PFN.exe`）**：以仓库根目录 `icon.ico` 为权威来源；`build.spec` 中 PyInstaller `EXE(..., icon=_exe_icon)` 必须解析到有效 `.ico`（优先根目录 `icon.ico`，否则 `assets/app_icon.ico`）。修改品牌图标时须同步更新上述文件并重新打包验证。
+- ✅ **包内资源**：`build.spec` 的 `datas` 须包含 `assets/app_icon.ico`（供冻结环境下 `sys._MEIPASS` 兜底读取），与 `app_qt.py` 主窗口初始化中的兜底路径一致。
+- ✅ **单文件分发**：`build.bat` / `build.spec` 仅产出 **单个 `PFN.exe`**；**推荐**在 exe 同目录放置 `icon.ico`（`build.bat` 会复制到 `PFN_app\`），供 `main.py` 的 `_root_icon_path()` 与 `WM_SETICON`；缺失时回退包内 `assets/app_icon.ico`。
+- ✅ **任务栏与 Jump List 身份**：`main.py` 在创建 `QApplication` **之前**调用 `ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID`（固定 AppID），不得随意改名或后移，否则 Windows 分组与图标缓存行为可能异常。
+- ✅ **运行时窗口图标**：主窗口须设置 `QIcon`（`main.py` 中 `app.setWindowIcon` / `window.setWindowIcon`）；Win32 补强使用 `WM_SETICON`（`main.py` 的 `_apply_wm_seticon` 与 `app_qt.py` 的 `_force_taskbar_icon_win32`）时，须与现有逻辑一致。
+- ❌ **禁止**在 `SendMessageW(hwnd, WM_SETICON, …, hicon)` 将 `LoadImageW` 得到的 `hicon` 交给窗口后，**立即**对**同一** `hicon` 调用 `DestroyIcon`。窗口仍引用该句柄时销毁会导致**任务栏按钮与任务管理器「窗口」行显示空白默认图标**，而进程行仍显示 exe 内嵌图标（典型误判为「未固定就不显示 logo」）。
+- ✅ **每次打包后自检（未固定到任务栏）**：启动分发目录中的 `PFN.exe`，确认任务栏按钮与任务管理器中窗口子项「PFN - 临床试验项目导航」均显示正确 logo。
+
+#### 3.2.2 分发形态（强制：仅单文件）
+- ✅ **唯一产物**：`build.bat` + `build.spec` 仅构建 **单文件 `PFN.exe`**（PyInstaller onefile），可复制到任意路径单独运行，**不再维护** onedir（无 `_internal` 目录版）。`build.bat` 将 `assets/DISTRIBUTION_zh.txt` 复制为 `PFN_app\DISTRIBUTION_zh.txt`（批处理文件仅使用 ASCII 路径，避免 cmd 编码解析错误）。
 
 ### 4. 命名与结构（增强可维护性）
 #### 4.1 命名规则（统一体感）
@@ -155,6 +165,7 @@ alwaysApply: true
 | SAS EG 展开 | 从启动到展开目标节点 ≤2秒，users路径不跳转到projects |
 | 剪贴板复制 | 右键粘贴到任意文件夹，文件完整且元数据保留，支持批量复制50个文件 |
 | 配置分发 | 打包EXE在新电脑运行，自动生成干净config.json，无开发者路径 |
+| Windows 图标与任务栏 | 单文件 `PFN.exe` 旁含 `icon.ico`（或由 build.bat 复制到 PFN_app）；未固定任务栏时启动，任务栏与任务管理器窗口行均显示正确 logo（非空白默认窗标） |
 | 线程交互 | 批量打开10个文件时，UI无卡顿，进度条实时更新 |
 | 路径超长处理 | 输入260+字符Z盘路径 → 提示「路径过长」，不抛出未捕获异常 |
 | program 目录展示 | `program` 下仅显示 `.sas`，不显示 `.lst/.txt` |

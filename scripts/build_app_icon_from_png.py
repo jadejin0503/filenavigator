@@ -49,7 +49,11 @@ def main() -> int:
     # 打包 exe 图标圆角（256 基准像素半径；比例约 27%，各嵌入尺寸随缩放保持观感一致）
     im256 = _round_corners_rgba(im256, 70)
     sizes = [(16, 16), (24, 24), (32, 32), (48, 48), (64, 64), (128, 128), (256, 256)]
-    im256.save(ico_path, format="ICO", sizes=sizes)
+    # BMP frames embed more reliably into PE / Shell than PNG-compressed ICO frames.
+    try:
+        im256.save(ico_path, format="ICO", sizes=sizes, bitmap_format="bmp")
+    except Exception:
+        im256.save(ico_path, format="ICO", sizes=sizes)
     print(f"[build_app_icon] 已写入: {ico_path}")
     return 0
 

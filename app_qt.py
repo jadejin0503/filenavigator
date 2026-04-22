@@ -346,6 +346,137 @@ def _pfn_is_min_favorite_depth(path):
     return len(parts) >= 4
 
 
+def _pfn_enumerate_addable_paths_under(root: str):
+    """深度优先枚举某 Z 盘根下所有「可单独添加收藏」的目录，规则与 _expand_node_to_min_favorite_paths 一致：
+    命中 _pfn_is_min_favorite_depth 的目录作为一条结果，不再向下递归。"""
+    root = os.path.normpath(root or "").replace("/", "\\")
+    out = []
+    if not root or not os.path.isdir(root):
+        return out
+
+    def walk(p: str):
+        try:
+            names = sorted(os.listdir(p))
+        except OSError:
+            return
+        for n in names:
+            if _pfn_excluded_favorite_dir(n):
+                continue
+            fp = os.path.join(p, n)
+            try:
+                if not os.path.isdir(fp):
+                    continue
+            except OSError:
+                continue
+            if _pfn_is_min_favorite_depth(fp):
+                out.append(os.path.normpath(fp).replace("/", "\\"))
+                continue
+            walk(fp)
+
+    walk(root)
+    return out
+
+
+def _pfn_safe_listdir_sorted(path: str):
+    try:
+        return sorted(os.listdir(path))
+    except OSError:
+        return []
+
+
+def _pfn_product_search_source_meta(path: str) -> tuple[str, str, int]:
+    """添加项目搜索下拉：来源徽章文案、tooltip 补充、排序分组（0 projects 1 unblinded 2 users）。"""
+    parts = _pfn_z_rel_parts(path)
+    if not parts:
+        return "?", "", 9
+    a0 = parts[0].lower()
+    if a0 == "projects":
+        return "projects", "", 0
+    if a0 == "unblinded":
+        return "unblinded", "", 1
+    if a0 == "users":
+        extra = ""
+        if len(parts) >= 3:
+            extra = f"{parts[1]} · {parts[2]}"
+        return "users", extra, 2
+    return a0, "", 9
+
+
+def _pfn_product_search_badge_stylesheet(badge: str) -> str:
+    b = (badge or "").strip().lower()
+    if b == "projects":
+        bg, fg = "#E8F3FF", "#165DFF"
+    elif b == "unblinded":
+        bg, fg = "#E8F8EF", "#00B42A"
+    elif b == "users":
+        bg, fg = "#FFF3E8", "#D25F00"
+    else:
+        bg, fg = "#F2F3F5", "#4E5969"
+    return (
+        f"QLabel{{background-color:{bg};color:{fg};border-radius:3px;padding:1px 5px;"
+        f"font-size:9px;font-weight:600;border:none;}}"
+    )
+
+
+def _pfn_is_z_product_directory(path: str) -> bool:
+    """是否为「产品」文件夹：projects|unblinded 下二级；users 下 .../projects|unblinded 下的产品一级。"""
+    parts = _pfn_z_rel_parts(path)
+    n = len(parts)
+    if n < 2:
+        return False
+    a0 = parts[0].lower()
+    if a0 in ("projects", "unblinded"):
+        return n == 2
+    if a0 == "users":
+        if n == 4 and parts[2].lower() in ("projects", "project", "unblinded"):
+            return True
+        if n == 3 and parts[1].lower() in ("projects", "project", "unblinded"):
+            return True
+    return False
+
+
+def _pfn_enumerate_z_product_directories():
+    """枚举 Z:\\projects、unblinded、users 下的产品目录（一级产品文件夹），返回 [(flat, path), ...]。"""
+    rows = []
+    seen = set()
+
+    def add_row(p: str):
+        pn = os.path.normpath(p).replace("/", "\\")
+        k = pn.lower()
+        if k in seen or not os.path.isdir(pn):
+            return
+        seen.add(k)
+        parts = _pfn_z_rel_parts(pn)
+        flat = "/".join(parts) if parts else os.path.basename(pn)
+        rows.append((flat, pn))
+
+    for root_nm in ("projects", "unblinded"):
+        base = os.path.normpath(f"Z:\\{root_nm}").replace("/", "\\")
+        if not os.path.isdir(base):
+            continue
+        for n in _pfn_safe_listdir_sorted(base):
+            if _pfn_excluded_favorite_dir(n):
+                continue
+            add_row(os.path.join(base, n))
+
+    users_base = os.path.normpath("Z:\\users").replace("/", "\\")
+    if os.path.isdir(users_base):
+        for uid in _pfn_safe_listdir_sorted(users_base):
+            udir = os.path.join(users_base, uid)
+            if not os.path.isdir(udir):
+                continue
+            for sub in ("projects", "project", "unblinded"):
+                sdir = os.path.join(udir, sub)
+                if not os.path.isdir(sdir):
+                    continue
+                for n in _pfn_safe_listdir_sorted(sdir):
+                    if _pfn_excluded_favorite_dir(n):
+                        continue
+                    add_row(os.path.join(sdir, n))
+    rows.sort(key=lambda x: (x[0].lower(), x[1].lower()))
+    return rows
+
+
 def _pfn_derive_product_name(sub_info: dict, sub_name: str, sub_key: str) -> str:
     """由子项目信息推导产品名（与待办列表逻辑一致）。"""
     rn = ""
@@ -1949,19 +2080,35 @@ class QtMainWindow(QMainWindow):
         except Exception:
             pass
         self.setWindowTitle("PFN - 临床试验项目导航")
+        # 主窗口图标：
+        # 1) 优先从 exe 同级根目录 icon.ico 读取（满足 Windows 任务栏“固定/不固定”一致取图标）
+        # 2) 兜底：从包内 assets/app_icon.ico 读取（PyInstaller: sys._MEIPASS）
         try:
-            _assets = os.path.join(os.path.dirname(__file__), "assets")
-            _logo_png = os.path.join(_assets, "pfn_logo_source.png")
-            if os.path.isfile(_logo_png):
-                _lp = QPixmap(_logo_png)
-                if not _lp.isNull():
-                    self.setWindowIcon(QIcon(_lp))
-            elif getattr(sys, "frozen", False):
-                self.setWindowIcon(QIcon(sys.executable))
-            else:
-                _ico = os.path.join(_assets, "app_icon.ico")
-                if os.path.isfile(_ico):
-                    self.setWindowIcon(QIcon(_ico))
+            icon_path = ""
+            try:
+                _exe_dir = os.path.dirname(os.path.abspath(sys.argv[0]))
+                _root_ico = os.path.join(_exe_dir, "icon.ico")
+                if os.path.exists(_root_ico):
+                    icon_path = _root_ico
+            except Exception:
+                icon_path = ""
+            if not icon_path:
+                _base = getattr(sys, "_MEIPASS", os.path.dirname(__file__))  # type: ignore[attr-defined]
+                icon_path = os.path.join(_base, "assets", "app_icon.ico")
+            if os.environ.get("PFN_ICON_DEBUG") == "1":
+                try:
+                    print("图标路径:", icon_path, "存在:", os.path.exists(icon_path), flush=True)
+                except Exception:
+                    pass
+            if os.path.exists(icon_path):
+                ico = QIcon(icon_path)
+                if not ico.isNull():
+                    self.setWindowIcon(ico)
+                    # 记录路径：用于 Windows 任务栏“强制刷新”图标
+                    try:
+                        self._pfn_icon_path = str(icon_path)
+                    except Exception:
+                        self._pfn_icon_path = ""
         except Exception:
             pass
         self.resize(1100, 720)
@@ -1986,11 +2133,58 @@ class QtMainWindow(QMainWindow):
 
     def showEvent(self, event):
         super().showEvent(event)
+        # Win11/部分 Qt 组合下，任务栏图标可能不从 setWindowIcon 及时同步；
+        # 这里在窗口首次显示后用 Win32 WM_SETICON 强制刷新（不影响其它平台）。
+        if sys.platform == "win32" and not getattr(self, "_pfn_taskbar_icon_forced", False):
+            self._pfn_taskbar_icon_forced = True
+            QTimer.singleShot(0, self._force_taskbar_icon_win32)
         # 窗口首次显示后再刷一次待办：QScrollArea 在首帧前常把内容高度算成 0，导致列表空白
         if not getattr(self, "_pfn_todo_after_show_done", False):
             self._pfn_todo_after_show_done = True
             # 仅一次：避免与 _load_favorites 末尾刷新叠加导致重复重建与弹窗链
             QTimer.singleShot(0, self._rebuild_todo_panel)
+
+    def _force_taskbar_icon_win32(self):
+        if sys.platform != "win32":
+            return
+        try:
+            hwnd = int(self.winId())  # WId -> HWND
+        except Exception:
+            return
+        icon_path = str(getattr(self, "_pfn_icon_path", "") or "").strip()
+        try:
+            user32 = ctypes.windll.user32
+            IMAGE_ICON = 1
+            LR_LOADFROMFILE = 0x0010
+            LR_DEFAULTSIZE = 0x0040
+            WM_SETICON = 0x0080
+            ICON_SMALL = 0
+            ICON_BIG = 1
+
+            # 注意：不得在此处 DestroyIcon(hicon)。WM_SETICON 后窗口仍引用该句柄；
+            # 立即销毁会导致任务栏/任务管理器“窗口”行变成默认空白图标（进程行仍显示 exe 图标）。
+            hicon = 0
+            if icon_path and os.path.exists(icon_path):
+                hicon = int(
+                    user32.LoadImageW(0, icon_path, IMAGE_ICON, 0, 0, LR_LOADFROMFILE | LR_DEFAULTSIZE) or 0
+                )
+            if hicon:
+                user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, hicon)
+                user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, hicon)
+                return
+            if getattr(sys, "frozen", False):
+                shell32 = ctypes.windll.shell32
+                h_large = ctypes.c_void_p()
+                h_small = ctypes.c_void_p()
+                exe = os.path.normpath(sys.executable)
+                n = int(shell32.ExtractIconExW(exe, 0, ctypes.byref(h_large), ctypes.byref(h_small), 1) or 0)
+                if n > 0:
+                    if h_small.value:
+                        user32.SendMessageW(hwnd, WM_SETICON, ICON_SMALL, h_small.value)
+                    if h_large.value:
+                        user32.SendMessageW(hwnd, WM_SETICON, ICON_BIG, h_large.value)
+        except Exception:
+            return
 
     def closeEvent(self, event):
         try:
@@ -8125,12 +8319,38 @@ class QtMainWindow(QMainWindow):
         if dlg.exec():
             self._load_favorites()
 
+
+class _ProductDirIndexRunnable(QRunnable):
+    """后台枚举 Z 盘产品级目录，避免阻塞「添加项目」对话框打开。"""
+
+    def __init__(self, dlg: "ProjectSelector"):
+        super().__init__()
+        self._dlg = dlg
+
+    def run(self):
+        try:
+            rows = _pfn_enumerate_z_product_directories()
+        except Exception:
+            rows = []
+        try:
+            self._dlg.product_index_ready.emit(rows)
+        except Exception:
+            pass
+
+
 class ProjectSelector(QDialog):
-    """添加项目对话框：支持多选子目录，自动归类为 产品→试验→子目录；默认定位到 Z:\\projects"""
+    """添加项目对话框：支持多选子目录，自动归类为 产品→试验→子目录。
+    搜索下拉仅展示产品目录；索引在首次输入搜索时于后台构建；回车/点击定位到树中对应产品节点。"""
+
+    product_index_ready = pyqtSignal(object)
 
     def __init__(self, parent, core: PFNCore):
         super().__init__(parent)
         self.core = core
+        self._disk_search_built = False
+        self._disk_search_rows = []
+        self._disk_index_worker_running = False
+        self.product_index_ready.connect(self._on_product_disk_index_ready)
         self.setWindowTitle("选择要添加的项目/子目录")
         self.resize(800, 600)
         self._build_ui()
@@ -8139,7 +8359,7 @@ class ProjectSelector(QDialog):
         layout = QVBoxLayout(self)
         # 顶部搜索栏 + 扁平下拉（与左侧收藏库一致）
         self.search_edit = QLineEdit()
-        self.search_edit.setPlaceholderText("搜索项目路径")
+        self.search_edit.setPlaceholderText("按产品名搜索（projects/users/unblinded）；首次搜索后台建索引，回车定位")
         self.search_edit.setClearButtonEnabled(True)
         self.search_edit.setFixedHeight(26)
         self.search_edit.setStyleSheet(
@@ -8214,8 +8434,33 @@ class ProjectSelector(QDialog):
         s = (s or "").strip().lower()
         return re.sub(r"[\s_\-\\/]+", "", s)
 
+    def _maybe_start_product_index_async(self):
+        """首次需要全盘产品列表时在后台线程枚举，避免卡 UI。"""
+        if self._disk_search_built or self._disk_index_worker_running:
+            return
+        self._disk_index_worker_running = True
+        QThreadPool.globalInstance().start(_ProductDirIndexRunnable(self))
+
+    def _on_product_disk_index_ready(self, rows):
+        self._disk_index_worker_running = False
+        try:
+            self._disk_search_rows = list(rows or [])
+            self._disk_search_built = True
+            self._rebuild_search_index()
+            txt = self.search_edit.text().strip()
+            if txt:
+                self._on_search_changed(txt)
+        except RuntimeError:
+            return
+
     def _rebuild_search_index(self):
-        """把当前已加载的树节点扁平化为 [(flat, path, item)]，用于快速搜索定位。"""
+        """仅索引「产品」级目录：已就绪的磁盘枚举结果 + 当前树中路径为产品层的节点。"""
+        by_path = {}
+        if getattr(self, "_disk_search_built", False):
+            for flat, p in getattr(self, "_disk_search_rows", []):
+                pn = os.path.normpath(str(p)).replace("/", "\\")
+                by_path[pn.lower()] = (flat, pn, None)
+
         out = []
 
         def flat_path_for_item(it: QTreeWidgetItem) -> str:
@@ -8231,13 +8476,49 @@ class ProjectSelector(QDialog):
         def walk(it: QTreeWidgetItem):
             p = it.data(0, Qt.ItemDataRole.UserRole)
             if p:
-                out.append((flat_path_for_item(it), os.path.normpath(str(p)).replace("/", "\\"), it))
+                pn = os.path.normpath(str(p)).replace("/", "\\")
+                if _pfn_is_z_product_directory(pn):
+                    out.append((flat_path_for_item(it), pn, it))
             for i in range(it.childCount()):
                 walk(it.child(i))
 
         for i in range(self.tree.topLevelItemCount()):
             walk(self.tree.topLevelItem(i))
-        self._search_index = out
+        for flat, pn, it in out:
+            by_path[pn.lower()] = (flat, pn, it)
+        self._search_index = sorted(by_path.values(), key=lambda x: (x[0].lower(), x[1].lower()))
+
+    def _scroll_tree_to_path(self, target_path: str):
+        """按路径逐级展开懒加载树并选中目标节点（用于仅来自磁盘索引的搜索结果）。"""
+        target_path = os.path.normpath(target_path or "").replace("/", "\\")
+        parts = _pfn_z_rel_parts(target_path)
+        if not parts:
+            return None
+        item = None
+        root_want = parts[0].lower()
+        for i in range(self.tree.topLevelItemCount()):
+            top = self.tree.topLevelItem(i)
+            if (top.text(0) or "").strip().lower() == root_want:
+                item = top
+                break
+        if item is None:
+            return None
+        for seg in parts[1:]:
+            self.tree.expandItem(item)
+            self._on_expand(item)
+            found = None
+            seg_l = (seg or "").strip().lower()
+            for j in range(item.childCount()):
+                ch = item.child(j)
+                if (ch.text(0) or "").strip().lower() == seg_l:
+                    found = ch
+                    break
+            if found is None:
+                return None
+            item = found
+        self.tree.setCurrentItem(item)
+        self.tree.scrollToItem(item)
+        return item
 
     def _position_search_list(self):
         x = self.search_edit.x()
@@ -8252,47 +8533,97 @@ class ProjectSelector(QDialog):
         if self.search_list.isVisible():
             self.search_list.hide()
 
+    def _search_match_rank(self, q_norm: str, q_raw: str, path: str, flat: str) -> tuple:
+        """下拉仅含产品目录：0=产品文件夹名命中，1=整条相对路径规范化命中，2=弱命中（仅规范化串、原文无子串）。"""
+        display = os.path.basename((path or "").rstrip("\\"))
+        nb = self._normalize_search_text(display)
+        nf = self._normalize_search_text(flat or "")
+        tier = 2
+        if q_norm and q_norm in nb:
+            tier = 0
+        elif q_norm in nf:
+            tier = 1
+        if tier >= 1 and q_raw:
+            pl = (path or "").lower()
+            fl = (flat or "").lower()
+            dl = display.lower()
+            if q_raw not in pl and q_raw not in fl and q_raw not in dl:
+                tier = 2
+        return (tier, display.lower())
+
     def _on_search_changed(self, text: str):
         q = self._normalize_search_text(text)
         if not q:
             self.search_list.clear()
             self._hide_search_list()
             return
-        # 索引可能因为展开而变化
+        self._maybe_start_product_index_async()
         if not self._search_index:
             self._rebuild_search_index()
         matches = []
         for flat, p, it in self._search_index:
-            if q in self._normalize_search_text(flat):
-                matches.append((flat, p, it))
+            base = os.path.basename((p or "").rstrip("\\"))
+            nflat = self._normalize_search_text(flat)
+            nbase = self._normalize_search_text(base)
+            if q not in nflat and q not in nbase:
+                continue
+            matches.append((flat, p, it))
         self.search_list.clear()
         if not matches:
             self._hide_search_list()
             return
-        matches = matches[:200]
         q_raw = (text or "").strip().lower()
+
+        def _sort_key(row):
+            tier_t = self._search_match_rank(q, q_raw, row[1], row[0])
+            _, _, sk = _pfn_product_search_source_meta(row[1])
+            return (tier_t[0], sk, tier_t[1])
+
+        matches.sort(key=_sort_key)
+        matches = matches[:200]
         for flat, p, it_ref in matches:
             it = QListWidgetItem()
             it.setData(Qt.ItemDataRole.UserRole, {"path": p, "tree_item": it_ref})
-            safe = html.escape(flat)
-            raw_lower = flat.lower()
-            idx = raw_lower.find(q_raw) if q_raw else -1
+            display = os.path.basename((p or "").rstrip("\\"))
+            badge, src_extra, _ = _pfn_product_search_source_meta(p)
+            src = display
+            idx = src.lower().find(q_raw) if q_raw else -1
+            if idx < 0 and q_raw:
+                src = flat
+                idx = src.lower().find(q_raw) if q_raw else -1
             if idx >= 0 and q_raw:
-                before = html.escape(flat[:idx])
-                mid = html.escape(flat[idx : idx + len(q_raw)])
-                after = html.escape(flat[idx + len(q_raw) :])
+                before = html.escape(src[:idx])
+                mid = html.escape(src[idx : idx + len(q_raw)])
+                after = html.escape(src[idx + len(q_raw) :])
                 rich = f"{before}<span style='color:#FF4444;'>{mid}</span>{after}"
             else:
-                rich = safe
-            lbl = QLabel()
-            lbl.setTextFormat(Qt.TextFormat.RichText)
-            lbl.setStyleSheet("background:transparent; border:none; outline:none;")
-            lbl.setFocusPolicy(Qt.FocusPolicy.NoFocus)
-            lbl.setText(rich)
-            lbl.setToolTip(p)
+                rich = html.escape(display)
+            tip_lines = [f"[{badge}]" + (f"  {src_extra}" if src_extra else ""), flat, p]
+            tip = "\n".join(tip_lines)
+            row_w = QWidget()
+            row_w.setStyleSheet("background:transparent; border:none; outline:none;")
+            row_w.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            h = QHBoxLayout(row_w)
+            h.setContentsMargins(4, 0, 4, 0)
+            h.setSpacing(6)
+            badge_lbl = QLabel(badge)
+            badge_lbl.setStyleSheet(_pfn_product_search_badge_stylesheet(badge))
+            badge_lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            badge_lbl.setFixedWidth(76)
+            badge_lbl.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            name_lbl = QLabel()
+            name_lbl.setTextFormat(Qt.TextFormat.RichText)
+            name_lbl.setStyleSheet("background:transparent; border:none; outline:none; font-size:9px;")
+            name_lbl.setFocusPolicy(Qt.FocusPolicy.NoFocus)
+            name_lbl.setText(rich)
+            name_lbl.setToolTip(tip)
+            badge_lbl.setToolTip(tip)
+            row_w.setToolTip(tip)
+            h.addWidget(badge_lbl, 0)
+            h.addWidget(name_lbl, 1)
             self.search_list.addItem(it)
-            it.setSizeHint(QSize(10, 23))
-            self.search_list.setItemWidget(it, lbl)
+            it.setSizeHint(QSize(10, 24))
+            self.search_list.setItemWidget(it, row_w)
         self._position_search_list()
         self.search_list.setCurrentRow(0)
         self.search_list.show()
@@ -8300,6 +8631,7 @@ class ProjectSelector(QDialog):
     def _on_search_item_clicked(self, item):
         payload = item.data(Qt.ItemDataRole.UserRole) or {}
         tree_item = payload.get("tree_item")
+        path = (payload.get("path") or "").strip()
         self._hide_search_list()
         if tree_item:
             # 展开所有父节点并定位
@@ -8309,6 +8641,8 @@ class ProjectSelector(QDialog):
                 cur = cur.parent()
             self.tree.setCurrentItem(tree_item)
             self.tree.scrollToItem(tree_item)
+        elif path:
+            self._scroll_tree_to_path(path)
 
     def eventFilter(self, obj, event):
         if obj is getattr(self, "search_edit", None):
@@ -8480,61 +8814,9 @@ class ProjectSelector(QDialog):
         else:
             QMessageBox.warning(self, "提示", f"未添加任何项目（跳过或失败 {fail} 个）")
 
-def main():
-    # 无控制台时（pythonw / FreeConsole 后）：print 仍可能触发 Windows 短暂分配控制台窗口
-    if sys.platform == "win32" and os.environ.get("PFN_KEEP_CONSOLE") != "1":
-        try:
-            if ctypes.windll.kernel32.GetConsoleWindow() == 0:
-                _dn = open(os.devnull, "w", encoding="utf-8", errors="replace")
-                sys.stdout = _dn
-                sys.stderr = _dn
-        except Exception:
-            pass
-    # 隐藏控制台窗口：即使外部用 `python app_qt.py` 启动，也不让控制台“弹出”
-    if sys.platform == "win32":
-        try:
-            hwnd = ctypes.windll.kernel32.GetConsoleWindow()
-            if hwnd:
-                ctypes.windll.user32.ShowWindow(hwnd, 0)  # SW_HIDE
-        except Exception:
-            pass
-    # 单实例保护：避免“重启工具”时重复启动多个 app_qt.py 实例
-    # （减少控制台/窗口重复弹出）
-    if sys.platform == "win32":
-        try:
-            mutex_name = "Global\\PFN_APP_QT_SINGLE_INSTANCE"
-            h = ctypes.windll.kernel32.CreateMutexW(None, True, mutex_name)
-            last_err = ctypes.windll.kernel32.GetLastError()
-            # ERROR_ALREADY_EXISTS = 183
-            if h and int(last_err) == 183:
-                return
-        except Exception:
-            pass
-    app = QApplication(sys.argv)
-    core = PFNCore()
-    win = QtMainWindow(core)
-    win.show()
-    sys.exit(app.exec())
-
 if __name__ == "__main__":
-    # 若被控制台 python 启动，优先自举到 pythonw/.pyw，减少“闪一下的 python 弹框”
-    if sys.platform == "win32":
-        try:
-            if ctypes.windll.kernel32.GetConsoleWindow() and not os.environ.get("PFN_LAUNCHED_SILENT"):
-                os.environ["PFN_LAUNCHED_SILENT"] = "1"
-                try:
-                    creationflags = subprocess.CREATE_NO_WINDOW
-                except Exception:
-                    creationflags = 0
-                subprocess.Popen(
-                    ["pythonw", os.path.join(os.path.dirname(__file__), "PFN_silent.pyw")],
-                    shell=False,
-                    creationflags=creationflags,
-                    cwd=os.path.dirname(__file__),
-                )
-                raise SystemExit(0)
-        except SystemExit:
-            raise
-        except Exception:
-            pass
-    main()
+    # Single entry point is main.py (frozen + dev). Keep app_qt.py as a library module.
+    import runpy
+
+    _main_py = os.path.join(os.path.dirname(os.path.abspath(__file__)), "main.py")
+    runpy.run_path(_main_py, run_name="__main__")
