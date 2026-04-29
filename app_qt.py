@@ -2398,8 +2398,8 @@ class QtMainWindow(QMainWindow):
         self.utility_path = os.path.normpath("Z:\\projects\\utility").replace("/", "\\")
         utility_frame = QFrame()
         utility_frame.setStyleSheet(
-            "QFrame#utilityFrame { background:#F5F7FA; border-radius:8px; padding:6px 12px; min-height:24px; } "
-            "QFrame#utilityFrame:hover { background:#EBEDF0; } "
+            "QFrame#utilityFrame { background:#F7F9FC; border:1px solid #E5EAF2; border-radius:10px; padding:6px 12px; min-height:28px; } "
+            "QFrame#utilityFrame:hover { background:#EEF3FA; border-color:#C7D5EA; } "
             "QLabel#utilityLabel { color:#1F2329; font-family:'Microsoft YaHei'; font-size:12px; background:transparent; } "
         )
         utility_frame.setObjectName("utilityFrame")
@@ -2411,7 +2411,7 @@ class QtMainWindow(QMainWindow):
         util_shadow.setColor(QColor(0, 0, 0, 13))
         utility_frame.setGraphicsEffect(util_shadow)
         utility_layout = QHBoxLayout(utility_frame)
-        utility_layout.setContentsMargins(12, 6, 12, 6)
+        utility_layout.setContentsMargins(12, 8, 12, 8)
         utility_label = QLabel("Utility 公共目录")
         utility_label.setObjectName("utilityLabel")
         utility_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2425,8 +2425,8 @@ class QtMainWindow(QMainWindow):
         header.setContentsMargins(0, 0, 0, 0)
         fav_card = QFrame()
         fav_card.setStyleSheet(
-            "QFrame#favCard { background:#F0F2F5; border-radius:6px; padding:6px 10px; } "
-            "QFrame#favCard:hover { background:#E5E6EB; } "
+            "QFrame#favCard { background:#F6F8FB; border:1px solid #E5EAF2; border-radius:10px; padding:7px 11px; } "
+            "QFrame#favCard:hover { background:#EEF3FA; border-color:#C7D5EA; } "
         )
         fav_card.setObjectName("favCard")
         fav_shadow = QGraphicsDropShadowEffect()
@@ -2436,8 +2436,8 @@ class QtMainWindow(QMainWindow):
         fav_shadow.setColor(QColor(0, 0, 0, 20))
         fav_card.setGraphicsEffect(fav_shadow)
         fav_layout = QHBoxLayout(fav_card)
-        fav_layout.setContentsMargins(10, 6, 12, 6)
-        fav_layout.setSpacing(4)
+        fav_layout.setContentsMargins(10, 7, 12, 7)
+        fav_layout.setSpacing(6)
         logo_lbl = QLabel()
         logo_lbl.setObjectName("pmHeaderLogo")
         _logo_sz = 24
@@ -2451,7 +2451,7 @@ class QtMainWindow(QMainWindow):
         title = QLabel("项目管理栏")
         title.setObjectName("favTitle")
         title.setStyleSheet(
-            "QLabel#favTitle{ font-family:'Microsoft YaHei'; font-size:14px; font-weight:500; color:#4E5969; background:transparent; } "
+            "QLabel#favTitle{ font-family:'Microsoft YaHei'; font-size:14px; font-weight:600; color:#3B4758; background:transparent; } "
             "QLabel#favTitle:hover{ color:#165DFF; } "
         )
         title.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2460,10 +2460,12 @@ class QtMainWindow(QMainWindow):
         header.addWidget(fav_card)
         header.addStretch()
         add_btn = QPushButton("+ 添加项目")
-        add_btn.setFixedHeight(32)
+        add_btn.setFixedHeight(34)
         add_btn.setStyleSheet(
-            "QPushButton{background:#165DFF; color:white; border:none; border-radius:8px; font-size:12px; padding:8px 14px;} "
-            "QPushButton:hover{background:#4080FF;} QPushButton:pressed{background:#0E42D2;}"
+            "QPushButton{background:#165DFF; color:white; border:1px solid #165DFF; border-radius:9px; font-size:12px; font-weight:600; padding:8px 16px;} "
+            "QPushButton:hover{background:#3C7CFF; border-color:#3C7CFF;} "
+            "QPushButton:pressed{background:#0E42D2; border-color:#0E42D2;} "
+            "QPushButton:disabled{background:#AFC8FF; border-color:#AFC8FF; color:#EAF1FF;}"
         )
         add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         shadow = QGraphicsDropShadowEffect()
