@@ -4130,6 +4130,7 @@ class QtMainWindow(QMainWindow):
             chk.toggled.connect(partial(self._on_personal_todo_checkbox_toggled, task_id))
 
             text_col = QWidget()
+            text_col.setStyleSheet("background:transparent; border:none;")
             text_col.setProperty("_pfn_personal_task_id", task_id)
             text_col.installEventFilter(self)
             tv = QVBoxLayout(text_col)
