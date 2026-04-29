@@ -1,6 +1,7 @@
 import os
 import sys
 import json
+import re
 
 # 用于记录「上次使用的 config 所在目录」，exe 复制到桌面时可回退到该目录找 config
 _PFN_SAVED_CONFIG_DIR_FILE = None
@@ -113,6 +114,128 @@ class ConfigManager:
             return {}
         return {str(k): bool(v) for k, v in d.items()}
 
+    @staticmethod
+    def _normalize_personal_task_item(raw):
+        if not isinstance(raw, dict):
+            return None
+        tid = str(raw.get("id", "") or "").strip()
+        content = str(raw.get("content", "") or "").strip()
+        if not tid or not content:
+            return None
+        status = str(raw.get("status", "未完成") or "未完成").strip()
+        if status in ("已完成", "完成", "done", "Done", "DONE"):
+            status = "已完成"
+        else:
+            status = "未完成"
+        pri = str(raw.get("priority", "中") or "中").strip()
+        if pri not in ("高", "中", "低"):
+            pri = "中"
+        created_at = str(raw.get("created_at", "") or "").strip()
+        completed_at = str(raw.get("completed_at", "") or "").strip()
+        due_date = str(raw.get("due_date", "") or "").strip()
+        if due_date and not re.match(r"^\d{4}-\d{2}-\d{2}$", due_date):
+            due_date = ""
+        if status != "已完成":
+            completed_at = ""
+        return {
+            "id": tid,
+            "content": content,
+            "created_at": created_at,
+            "status": status,
+            "completed_at": completed_at,
+            "priority": pri,
+            "due_date": due_date,
+        }
+
+    def get_personal_tasks(self):
+        raw = self.data.get("personal_tasks", [])
+        if not isinstance(raw, list):
+            return []
+        out = []
+        seen = set()
+        for x in raw:
+            item = self._normalize_personal_task_item(x)
+            if not item:
+                continue
+            tid = item["id"]
+            if tid in seen:
+                continue
+            seen.add(tid)
+            out.append(item)
+        return out
+
+    def add_personal_task(self, task):
+        item = self._normalize_personal_task_item(task)
+        if not item:
+            return False
+        tasks = self.get_personal_tasks()
+        for t in tasks:
+            if str(t.get("id", "")) == item["id"]:
+                return False
+        tasks.append(item)
+        self.data["personal_tasks"] = tasks
+        self.save()
+        return True
+
+    def update_personal_task(self, task_id, patch):
+        tid = str(task_id or "").strip()
+        if not tid or not isinstance(patch, dict):
+            return False
+        tasks = self.get_personal_tasks()
+        changed = False
+        for i, t in enumerate(tasks):
+            if str(t.get("id", "")) != tid:
+                continue
+            merged = dict(t)
+            for k in ("content", "priority", "status", "completed_at", "due_date"):
+                if k in patch:
+                    merged[k] = patch.get(k)
+            item = self._normalize_personal_task_item(merged)
+            if not item:
+                return False
+            tasks[i] = item
+            changed = True
+            break
+        if not changed:
+            return False
+        self.data["personal_tasks"] = tasks
+        self.save()
+        return True
+
+    def delete_personal_task(self, task_id):
+        tid = str(task_id or "").strip()
+        if not tid:
+            return False
+        tasks = self.get_personal_tasks()
+        new_tasks = [t for t in tasks if str(t.get("id", "")) != tid]
+        if len(new_tasks) == len(tasks):
+            return False
+        self.data["personal_tasks"] = new_tasks
+        self.save()
+        return True
+
+    def get_personal_due_alert_date(self):
+        st = self.data.get("ui_state")
+        if not isinstance(st, dict):
+            return ""
+        pt = st.get("personal_todo")
+        if not isinstance(pt, dict):
+            return ""
+        v = str(pt.get("last_due_alert_date", "") or "").strip()
+        return v if re.match(r"^\d{4}-\d{2}-\d{2}$", v) else ""
+
+    def set_personal_due_alert_date(self, date_str):
+        v = str(date_str or "").strip()
+        if v and not re.match(r"^\d{4}-\d{2}-\d{2}$", v):
+            return False
+        if "ui_state" not in self.data or not isinstance(self.data.get("ui_state"), dict):
+            self.data["ui_state"] = {}
+        if "personal_todo" not in self.data["ui_state"] or not isinstance(self.data["ui_state"].get("personal_todo"), dict):
+            self.data["ui_state"]["personal_todo"] = {}
+        self.data["ui_state"]["personal_todo"]["last_due_alert_date"] = v
+        self.save()
+        return True
+
     def save_todo_product_expanded_snapshot(self, expanded_map):
         """一次性写入当前内存中的展开状态（收起/展开后立即或关闭窗口时调用）。"""
         if "ui_state" not in self.data or not isinstance(self.data.get("ui_state"), dict):
@@ -120,6 +243,43 @@ class ConfigManager:
         clean = {str(k): bool(v) for k, v in (expanded_map or {}).items() if str(k).strip()}
         self.data["ui_state"]["todo_product_expanded"] = clean
         self.save()
+
+    def get_todo_filters(self):
+        """返回待办筛选状态：{'project': 0-2, 'personal': 0-2}。"""
+        st = self.data.get("ui_state")
+        if not isinstance(st, dict):
+            return {"project": 0, "personal": 0}
+        tf = st.get("todo_filters")
+        if not isinstance(tf, dict):
+            return {"project": 0, "personal": 0}
+        out = {"project": 0, "personal": 0}
+        for k in ("project", "personal"):
+            try:
+                v = int(tf.get(k, 0))
+            except Exception:
+                v = 0
+            if v < 0 or v > 2:
+                v = 0
+            out[k] = v
+        return out
+
+    def save_todo_filter(self, tab_key: str, filter_index: int):
+        k = str(tab_key or "").strip().lower()
+        if k not in ("project", "personal"):
+            return False
+        try:
+            idx = int(filter_index)
+        except Exception:
+            idx = 0
+        if idx < 0 or idx > 2:
+            idx = 0
+        if "ui_state" not in self.data or not isinstance(self.data.get("ui_state"), dict):
+            self.data["ui_state"] = {}
+        if "todo_filters" not in self.data["ui_state"] or not isinstance(self.data["ui_state"].get("todo_filters"), dict):
+            self.data["ui_state"]["todo_filters"] = {"project": 0, "personal": 0}
+        self.data["ui_state"]["todo_filters"][k] = idx
+        self.save()
+        return True
 
     def get_pinned_projects(self):
         v = self.data.get("pinned_projects", [])
@@ -634,12 +794,36 @@ class ConfigManager:
         if "project_tasks" not in self.data or not isinstance(self.data.get("project_tasks"), dict):
             self.data["project_tasks"] = {}
 
+        if "personal_tasks" not in self.data or not isinstance(self.data.get("personal_tasks"), list):
+            self.data["personal_tasks"] = []
+        else:
+            self.data["personal_tasks"] = self.get_personal_tasks()
+
         if "ui_state" not in self.data or not isinstance(self.data.get("ui_state"), dict):
             self.data["ui_state"] = {}
         else:
             us = self.data["ui_state"]
             if "todo_product_expanded" in us and not isinstance(us.get("todo_product_expanded"), dict):
                 us["todo_product_expanded"] = {}
+            if "todo_filters" in us and not isinstance(us.get("todo_filters"), dict):
+                us["todo_filters"] = {"project": 0, "personal": 0}
+            if "personal_todo" in us and not isinstance(us.get("personal_todo"), dict):
+                us["personal_todo"] = {}
+        if "todo_filters" not in self.data["ui_state"] or not isinstance(self.data["ui_state"].get("todo_filters"), dict):
+            self.data["ui_state"]["todo_filters"] = {"project": 0, "personal": 0}
+        for _k in ("project", "personal"):
+            try:
+                _v = int(self.data["ui_state"]["todo_filters"].get(_k, 0))
+            except Exception:
+                _v = 0
+            if _v < 0 or _v > 2:
+                _v = 0
+            self.data["ui_state"]["todo_filters"][_k] = _v
+        if "personal_todo" not in self.data["ui_state"] or not isinstance(self.data["ui_state"].get("personal_todo"), dict):
+            self.data["ui_state"]["personal_todo"] = {}
+        lad = str(self.data["ui_state"]["personal_todo"].get("last_due_alert_date", "") or "").strip()
+        if lad and not re.match(r"^\d{4}-\d{2}-\d{2}$", lad):
+            self.data["ui_state"]["personal_todo"]["last_due_alert_date"] = ""
 
         if save:
             self.save()

@@ -519,6 +519,41 @@ _RIGHT_TREE_STYLE = (
     "QTreeWidget::item:selected{background:#E8F3FF; color:#165DFF;} "
 )
 
+# 右键 / QMenu：与右侧树 hover 同色板，悬停与选中对比更明显（优于系统默认浅灰）
+_CONTEXT_MENU_QSS = (
+    "QMenu{"
+    "background-color:#FFFFFF;"
+    "border:1px solid #E5E6EB;"
+    "border-radius:6px;"
+    "padding:2px;"
+    "}"
+    "QMenu::item{"
+    "padding:3px 14px 3px 10px;"
+    "border-radius:4px;"
+    "color:#1F2329;"
+    "background-color:transparent;"
+    "}"
+    "QMenu::item:disabled{color:#C9CDD4;background-color:transparent;}"
+    "QMenu::item:selected{"
+    "background-color:#D1E5FF;"
+    "color:#165DFF;"
+    "}"
+    "QMenu::item:hover{"
+    "background-color:#D1E5FF;"
+    "color:#165DFF;"
+    "}"
+    "QMenu::separator{height:1px;margin:3px 8px;background:#E5E6EB;}"
+)
+
+
+def _style_pfn_context_menu(menu: QMenu) -> None:
+    """为右键菜单及所有子菜单应用统一 QSS（递归）。"""
+    menu.setStyleSheet(_CONTEXT_MENU_QSS)
+    for act in menu.actions():
+        sub = act.menu()
+        if sub is not None:
+            _style_pfn_context_menu(sub)
+
 
 def _pfn_font_for_delegate_paint(f: QFont) -> QFont:
     """样式表 font-size 为 px 时 QFont 常为 pointSize=-1，Qt 在 QStyledItemDelegate 内会触发 setPointSize(-1) 警告。
@@ -965,6 +1000,82 @@ class SingleTodoTaskEditDialog(QDialog):
 
     def is_done(self):
         return self.chk_done.isChecked()
+
+
+class PersonalTodoTaskEditDialog(QDialog):
+    """个人待办编辑：内容、优先级、可选截止日期、完成状态。"""
+
+    def __init__(self, parent, title, task_dict=None):
+        super().__init__(parent)
+        self.setWindowTitle(title)
+        self.resize(460, 320)
+        lay = QVBoxLayout(self)
+
+        lay.addWidget(QLabel("任务内容"))
+        self.edit_content = QTextEdit()
+        self.edit_content.setPlaceholderText("输入任务描述")
+        lay.addWidget(self.edit_content)
+
+        row_pri = QHBoxLayout()
+        row_pri.addWidget(QLabel("优先级"))
+        self.combo_pri = QComboBox()
+        self.combo_pri.addItems(["高", "中", "低"])
+        self.combo_pri.setCurrentText("中")
+        row_pri.addWidget(self.combo_pri, 1)
+        lay.addLayout(row_pri)
+
+        row_due = QHBoxLayout()
+        row_due.addWidget(QLabel("截止日期"))
+        self.date_due = QDateEdit()
+        self.date_due.setCalendarPopup(True)
+        self.date_due.setDisplayFormat("yyyy-MM-dd")
+        self.date_due.setDate(QDate.currentDate())
+        self.date_due.setKeyboardTracking(False)
+        row_due.addWidget(self.date_due, 1)
+        self.chk_no_due = QCheckBox("不设置日期")
+        self.chk_no_due.setChecked(True)
+        row_due.addWidget(self.chk_no_due, 0)
+        lay.addLayout(row_due)
+        self.chk_no_due.toggled.connect(lambda x: self.date_due.setEnabled(not bool(x)))
+
+        self.chk_done = QCheckBox("标记为已完成")
+        lay.addWidget(self.chk_done)
+
+        if isinstance(task_dict, dict):
+            self.edit_content.setPlainText(str(task_dict.get("content", "") or ""))
+            tp = str(task_dict.get("priority", "") or "").strip()
+            if tp in ("高", "中", "低"):
+                self.combo_pri.setCurrentText(tp)
+            s = str(task_dict.get("status", "未完成") or "未完成").strip()
+            self.chk_done.setChecked(s in ("已完成", "完成", "done", "Done", "DONE"))
+            due = str(task_dict.get("due_date", "") or "").strip()
+            if due:
+                qd = QDate.fromString(due, "yyyy-MM-dd")
+                if qd.isValid():
+                    self.date_due.setDate(qd)
+                    self.chk_no_due.setChecked(False)
+        self.date_due.setEnabled(not self.chk_no_due.isChecked())
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+        self.setStyleSheet("QDialog{font-size:12px; color:#1F2329;}")
+
+    def get_content(self):
+        return str(self.edit_content.toPlainText() or "").strip()
+
+    def get_priority(self):
+        p = str(self.combo_pri.currentText() or "中")
+        return p if p in ("高", "中", "低") else "中"
+
+    def is_done(self):
+        return self.chk_done.isChecked()
+
+    def get_due_date(self):
+        if self.chk_no_due.isChecked():
+            return ""
+        return str(self.date_due.date().toString("yyyy-MM-dd") or "").strip()
 
 
 class SimplePieChartWidget(QWidget):
@@ -2143,6 +2254,35 @@ class QtMainWindow(QMainWindow):
             self._pfn_todo_after_show_done = True
             # 仅一次：避免与 _load_favorites 末尾刷新叠加导致重复重建与弹窗链
             QTimer.singleShot(0, self._rebuild_todo_panel)
+            QTimer.singleShot(200, self._check_personal_due_alert_once)
+
+    def _check_personal_due_alert_once(self):
+        getter = getattr(self.core.config, "get_personal_tasks", None)
+        get_last = getattr(self.core.config, "get_personal_due_alert_date", None)
+        set_last = getattr(self.core.config, "set_personal_due_alert_date", None)
+        if not callable(getter) or not callable(get_last) or not callable(set_last):
+            return
+        today_s = datetime.now().strftime("%Y-%m-%d")
+        if str(get_last() or "") == today_s:
+            return
+        due_today = []
+        for t in (getter() or []):
+            if not isinstance(t, dict):
+                continue
+            if self._normalize_task_status(t) == "已完成":
+                continue
+            due = str(t.get("due_date", "") or "").strip()
+            if due == today_s:
+                due_today.append(t)
+        if not due_today:
+            return
+        lines = []
+        for t in due_today:
+            pri = str(t.get("priority", "中") or "中")
+            txt = str(t.get("content", "") or "").strip() or "（无内容）"
+            lines.append(f"• [{pri}] {txt}")
+        QMessageBox.information(self, "今日到期提醒", "以下个人待办今天到期：\n\n" + "\n".join(lines))
+        set_last(today_s)
 
     def _force_taskbar_icon_win32(self):
         if sys.platform != "win32":
@@ -2403,12 +2543,12 @@ class QtMainWindow(QMainWindow):
             "QTabWidget{background:#F6F7FB;}"
             "QTabWidget::pane{border:1px solid #E5E6EB; border-radius:12px; background:#FFFFFF; top:-1px;}"
             "QTabBar{background:transparent;}"
-            # Tab：胶囊风格
-            "QTabBar::tab{min-width:120px; padding:8px 14px; margin:8px 6px 0 6px; "
+            # 一级 Tab：更大更醒目
+            "QTabBar::tab{min-width:132px; padding:10px 16px; margin:8px 6px 0 6px; "
             "border:1px solid transparent; border-top-left-radius:10px; border-top-right-radius:10px; "
-            "color:#4E5969; background:transparent;}"
+            "color:#4E5969; background:transparent; font-size:13px; font-weight:500;}"
             "QTabBar::tab:hover{color:#1F2329; background:rgba(22,93,255,0.08);}"
-            "QTabBar::tab:selected{color:#165DFF; background:#FFFFFF; border:1px solid #E5E6EB; border-bottom-color:#FFFFFF; font-weight:600;}"
+            "QTabBar::tab:selected{color:#165DFF; background:#FFFFFF; border:1px solid #E5E6EB; border-bottom-color:#FFFFFF; font-size:14px; font-weight:700;}"
             # 下拉控件统一一点质感（只影响 tabs 内部，避免影响全局）
             "QComboBox{border:1px solid #D0D3D8; border-radius:8px; padding:4px 10px; background:#FFFFFF;}"
             "QComboBox:focus{border-color:#165DFF;}"
@@ -2493,6 +2633,10 @@ class QtMainWindow(QMainWindow):
         if self._todo_product_drag_handle_event(obj, event):
             return True
         if event.type() == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
+            ptid = obj.property("_pfn_personal_task_id")
+            if ptid is not None and str(ptid).strip() != "":
+                self._open_personal_todo_task_editor(str(ptid))
+                return True
             sk = obj.property("_pfn_todo_sub_key")
             tid = obj.property("_pfn_todo_task_id")
             if sk is not None and str(sk).strip() != "" and tid is not None and str(tid).strip() != "":
@@ -2639,7 +2783,40 @@ class QtMainWindow(QMainWindow):
                 leaf.setIcon(0, icon_for_file_soft(fp, 14))
                 docs_root.addChild(leaf)
         return docs_root
-    
+
+    def _build_documentations_node_users(self, base):
+        """users 收藏：名称与图标与 projects 的 Documents 一致；列出项目根下 utility\\documentation 中的全部文件（非目录条目）。"""
+        doc_dir = os.path.normpath(os.path.join(base, "utility", "documentation")).replace("/", "\\")
+        root_item = QTreeWidgetItem(["Documents", ""])
+        root_item.setData(0, Qt.ItemDataRole.UserRole, None)
+        root_item.setData(1, Qt.ItemDataRole.UserRole, "documentations_root")
+        root_item.setIcon(0, icon_product_outlined(14))
+        if doc_dir:
+            root_item.setData(0, Qt.ItemDataRole.UserRole, doc_dir)
+        if not os.path.isdir(doc_dir):
+            return root_item
+        try:
+            names = sorted(os.listdir(doc_dir), key=lambda x: str(x).lower())
+        except Exception:
+            names = []
+        for n in names:
+            p = os.path.join(doc_dir, n)
+            try:
+                if not os.path.isfile(p):
+                    continue
+            except Exception:
+                continue
+            display = _strip_prefix(n)
+            mtime = _mtime_str(p)
+            leaf = QTreeWidgetItem([display, mtime])
+            leaf.setData(0, Qt.ItemDataRole.UserRole, p)
+            leaf.setData(1, Qt.ItemDataRole.UserRole, "file")
+            leaf.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            leaf.setToolTip(0, p)
+            leaf.setIcon(0, icon_for_file_soft(p, 14))
+            root_item.addChild(leaf)
+        return root_item
+
     def _show_loading(self):
         self.loading.show()
     
@@ -2858,10 +3035,18 @@ class QtMainWindow(QMainWindow):
         lay.setContentsMargins(12, 10, 12, 12)
         lay.setSpacing(8)
 
-        todo_title = QLabel("我的待办")
-        todo_title.setStyleSheet("color:#1F2329;")
-        todo_title.setFont(_pfn_qfont_pt(12, True))
-        lay.addWidget(todo_title)
+        self.todo_inner_tabs = QTabWidget()
+        self.todo_inner_tabs.setDocumentMode(True)
+        self.todo_inner_tabs.setStyleSheet(
+            "QTabWidget{background:transparent;}"
+            "QTabWidget::pane{border:none; background:transparent;}"
+            "QTabBar::tab{padding:4px 12px; margin-right:6px; border:1px solid #E5E6EB; border-radius:8px; color:#4E5969; background:#F7F8FA; font-size:11px; font-weight:500;}"
+            "QTabBar::tab:selected{color:#165DFF; border-color:#BCD4FF; background:#EEF4FF; font-size:12px; font-weight:600;}"
+        )
+        self.todo_inner_tabs.addTab(QWidget(), "项目待办")
+        self.todo_inner_tabs.addTab(QWidget(), "个人待办")
+        self.todo_inner_tabs.currentChanged.connect(self._on_todo_inner_tab_changed)
+        lay.addWidget(self.todo_inner_tabs)
 
         self.todo_filter_combo = QComboBox()
         self.todo_filter_combo.addItems(["显示全部", "仅显示未完成", "仅显示已完成"])
@@ -2871,6 +3056,22 @@ class QtMainWindow(QMainWindow):
         self.todo_filter_combo.setFont(_pfn_qfont_pt(8))
         self.todo_filter_combo.currentIndexChanged.connect(self._on_todo_filter_changed)
         lay.addWidget(self.todo_filter_combo)
+        self._todo_filter_state = {"project": 0, "personal": 0}
+        try:
+            getter = getattr(self.core.config, "get_todo_filters", None)
+            if callable(getter):
+                v = getter() or {}
+                self._todo_filter_state["project"] = int(v.get("project", 0))
+                self._todo_filter_state["personal"] = int(v.get("personal", 0))
+        except Exception:
+            self._todo_filter_state = {"project": 0, "personal": 0}
+        for _k in ("project", "personal"):
+            if self._todo_filter_state.get(_k, 0) not in (0, 1, 2):
+                self._todo_filter_state[_k] = 0
+        try:
+            self.todo_filter_combo.setCurrentIndex(int(self._todo_filter_state.get("project", 0)))
+        except Exception:
+            self.todo_filter_combo.setCurrentIndex(0)
 
         self.todo_scroll = QScrollArea()
         self.todo_scroll.setWidgetResizable(True)
@@ -2902,7 +3103,27 @@ class QtMainWindow(QMainWindow):
         self._todo_insert_line.raise_()
 
         self.todo_scroll.setWidget(self.todo_cont)
-        lay.addWidget(self.todo_scroll, 1)
+        self.todo_inner_tabs.widget(0).setLayout(QVBoxLayout())
+        self.todo_inner_tabs.widget(0).layout().setContentsMargins(0, 0, 0, 0)
+        self.todo_inner_tabs.widget(0).layout().addWidget(self.todo_scroll, 1)
+
+        self.personal_todo_scroll = QScrollArea()
+        self.personal_todo_scroll.setWidgetResizable(True)
+        self.personal_todo_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.personal_todo_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.personal_todo_scroll.setMinimumHeight(200)
+        self.personal_todo_scroll.setStyleSheet(self.todo_scroll.styleSheet())
+        self.personal_todo_cont = QWidget()
+        self.personal_todo_cont.setStyleSheet("background:#F7F8FA;")
+        self.personal_todo_cont.setFont(_pfn_qfont_pt(8))
+        self.personal_todo_cont.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        self.personal_todo_layout = QVBoxLayout(self.personal_todo_cont)
+        self.personal_todo_layout.setContentsMargins(2, 4, 4, 10)
+        self.personal_todo_layout.setSpacing(8)
+        self.personal_todo_scroll.setWidget(self.personal_todo_cont)
+        self.todo_inner_tabs.widget(1).setLayout(QVBoxLayout())
+        self.todo_inner_tabs.widget(1).layout().setContentsMargins(0, 0, 0, 0)
+        self.todo_inner_tabs.widget(1).layout().addWidget(self.personal_todo_scroll, 1)
 
         # 待办产品拖拽状态（自定义重排，不用 QDrag）
         self._todo_dnd_press_frame = None
@@ -2921,6 +3142,33 @@ class QtMainWindow(QMainWindow):
             print(f"[Filter Changed] 当前筛选: {name}", flush=True)
         except Exception:
             pass
+        tab_key = "personal" if self._is_personal_todo_active() else "project"
+        try:
+            idx = int(self.todo_filter_combo.currentIndex())
+        except Exception:
+            idx = 0
+        if idx < 0 or idx > 2:
+            idx = 0
+        self._todo_filter_state[tab_key] = idx
+        try:
+            saver = getattr(self.core.config, "save_todo_filter", None)
+            if callable(saver):
+                saver(tab_key, idx)
+        except Exception:
+            pass
+        self._rebuild_todo_panel()
+
+    def _on_todo_inner_tab_changed(self, _i: int):
+        tab_key = "personal" if self._is_personal_todo_active() else "project"
+        idx = int(self._todo_filter_state.get(tab_key, 0))
+        if idx < 0 or idx > 2:
+            idx = 0
+        try:
+            b = QSignalBlocker(self.todo_filter_combo)
+            self.todo_filter_combo.setCurrentIndex(idx)
+            del b
+        except Exception:
+            self.todo_filter_combo.setCurrentIndex(idx)
         self._rebuild_todo_panel()
 
     def _on_todo_product_order_changed(self, order_list):
@@ -3698,6 +3946,16 @@ class QtMainWindow(QMainWindow):
                 w.setParent(None)
                 w.deleteLater()
 
+    def _clear_personal_todo_layout(self):
+        if getattr(self, "personal_todo_layout", None) is None:
+            return
+        while self.personal_todo_layout.count():
+            item = self.personal_todo_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+
     def _toggle_todo_product(self, product_name: str, content_widget: QWidget):
         """点击产品标题：展开/收起该产品下的子项目与任务（带高度动画）。"""
         name = str(product_name or "").strip()
@@ -3770,8 +4028,155 @@ class QtMainWindow(QMainWindow):
         content_widget._pfn_anim = anim
         anim.start()
 
+    def _is_personal_todo_active(self) -> bool:
+        tabs = getattr(self, "todo_inner_tabs", None)
+        if tabs is None:
+            return False
+        return int(tabs.currentIndex()) == 1
+
+    def _rebuild_personal_todo_panel(self):
+        if getattr(self, "personal_todo_layout", None) is None:
+            return
+        self._clear_personal_todo_layout()
+        filter_index = 0
+        if getattr(self, "todo_filter_combo", None) is not None:
+            filter_index = int(self.todo_filter_combo.currentIndex())
+            if filter_index < 0 or filter_index > 2:
+                filter_index = 0
+
+        getter = getattr(self.core.config, "get_personal_tasks", None)
+        tasks = getter() if callable(getter) else []
+        if not isinstance(tasks, list):
+            tasks = []
+
+        today_s = datetime.now().strftime("%Y-%m-%d")
+        priority_rank = {"高": 0, "中": 1, "低": 2}
+        rows = []
+        for t in tasks:
+            if not isinstance(t, dict):
+                continue
+            st = self._normalize_task_status(t)
+            if filter_index == 1 and st == "已完成":
+                continue
+            if filter_index == 2 and st != "已完成":
+                continue
+            pri = str(t.get("priority", "中") or "中")
+            if pri not in ("高", "中", "低"):
+                pri = "中"
+            due = str(t.get("due_date", "") or "").strip()
+            overdue = bool(due and due < today_s and st != "已完成")
+            rows.append((1 if st == "已完成" else 0, priority_rank.get(pri, 1), str(t.get("created_at", "")), overdue, t))
+        rows.sort(key=lambda x: (x[0], x[1], x[2]))
+
+        add_btn = QPushButton("+ 添加任务")
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_btn.setStyleSheet(
+            "QPushButton{border:none;color:#165DFF;background:transparent;text-align:left;padding:4px 2px 6px 2px;font-size:10px;}"
+            "QPushButton:hover{color:#0E42D2;text-decoration:underline;}"
+        )
+        add_btn.clicked.connect(self._on_personal_todo_add_clicked)
+        self.personal_todo_layout.addWidget(add_btn)
+
+        chk_style = (
+            "QCheckBox { spacing: 5px; background: transparent; color: #1F2329; }"
+            "QCheckBox::indicator { width: 10px; height: 10px; border-radius: 5px; border: 1px solid rgba(31,35,41,130); background: rgba(255,255,255,200); }"
+            "QCheckBox::indicator:unchecked { border-radius: 5px; border: 1px solid rgba(31,35,41,130); background: rgba(255,255,255,200); image: none; }"
+            "QCheckBox::indicator:checked { border-radius: 5px; border: 1px solid rgba(31,35,41,160); background: rgba(31,35,41,170); image: none; }"
+        )
+
+        if not rows:
+            hint = QLabel("暂无个人待办，点击 + 添加任务")
+            hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            hint.setWordWrap(True)
+            hint.setMinimumHeight(120)
+            hint.setStyleSheet("color:#86909C; padding:24px;")
+            hint.setFont(_pfn_qfont_pt(10))
+            self.personal_todo_layout.addWidget(hint)
+            self.personal_todo_layout.addStretch(1)
+            return
+
+        for _done_key, _pr, _ct, overdue, task in rows:
+            task_id = str(task.get("id", "") or "")
+            content = str(task.get("content", "") or "").strip() or "（无内容）"
+            created = str(task.get("created_at", "") or "")
+            pri = str(task.get("priority", "中") or "中")
+            due = str(task.get("due_date", "") or "").strip()
+            is_done = self._normalize_task_status(task) == "已完成"
+
+            row_w = QFrame()
+            if is_done:
+                row_w.setStyleSheet(
+                    "QFrame{background:#F2F3F5; border:none; border-radius:10px;}"
+                )
+            elif overdue:
+                row_w.setStyleSheet(
+                    "QFrame{background:#FFF2F0; border:none; border-radius:10px;}"
+                )
+            else:
+                row_w.setStyleSheet(
+                    "QFrame{background:#FFFFFF; border:none; border-radius:10px;}"
+                )
+            row_w.setMinimumHeight(58)
+            row_h = QHBoxLayout(row_w)
+            row_h.setContentsMargins(14, 8, 10, 8)
+            row_h.setSpacing(6)
+
+            chk = QCheckBox()
+            chk.setStyleSheet(chk_style)
+            chk.setCursor(Qt.CursorShape.PointingHandCursor)
+            chk.blockSignals(True)
+            chk.setChecked(is_done)
+            chk.blockSignals(False)
+            chk.toggled.connect(partial(self._on_personal_todo_checkbox_toggled, task_id))
+
+            text_col = QWidget()
+            text_col.setProperty("_pfn_personal_task_id", task_id)
+            text_col.installEventFilter(self)
+            tv = QVBoxLayout(text_col)
+            tv.setContentsMargins(0, 0, 0, 0)
+            tv.setSpacing(3)
+
+            body = QLabel(content)
+            body.setWordWrap(True)
+            body.setFont(_pfn_qfont_pt(10))
+            if is_done:
+                body.setStyleSheet("color:#86909C; border:none; background:transparent;")
+            elif overdue:
+                body.setStyleSheet("color:#D03050; border:none; background:transparent;")
+            else:
+                body.setStyleSheet("color:#1F2329; border:none; background:transparent;")
+            body.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+            meta_parts = [f"创建：{created}", f"优先级：{pri}"]
+            if due:
+                meta_parts.append(f"截止：{due}")
+            meta_text = "  ·  ".join(meta_parts)
+            meta = QLabel(meta_text)
+            if is_done:
+                meta.setStyleSheet("color:#C9CDD4; border:none; background:transparent;")
+            elif overdue:
+                meta.setStyleSheet("color:#D03050; border:none; background:transparent;")
+            else:
+                meta.setStyleSheet("color:#86909C; border:none; background:transparent;")
+            meta.setFont(_pfn_qfont_pt(9))
+            meta.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            tv.addWidget(body)
+            tv.addWidget(meta)
+
+            row_h.addWidget(chk, 0, Qt.AlignmentFlag.AlignTop)
+            row_h.addWidget(text_col, 1)
+            row_w.setProperty("_pfn_personal_task_id", task_id)
+            row_w.installEventFilter(self)
+            row_w.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            row_w.customContextMenuRequested.connect(partial(self._on_personal_todo_row_context_menu, row_w, task_id))
+            self.personal_todo_layout.addWidget(row_w)
+        self.personal_todo_layout.addStretch(1)
+
     def _rebuild_todo_panel(self):
         """根据筛选重建「我的待办」列表（产品-项目-任务三级：产品卡片 -> 子项目分组 -> 任务行）。"""
+        if self._is_personal_todo_active():
+            self._rebuild_personal_todo_panel()
+            return
         if getattr(self, "todo_layout", None) is None:
             return
         self._todo_reset_product_drag_ui()
@@ -4004,19 +4409,29 @@ class QtMainWindow(QMainWindow):
                 head_row.setStyleSheet("background:transparent;")
                 head_h = QHBoxLayout(head_row)
                 head_h.setContentsMargins(0, 0, 0, 0)
-                head_h.setSpacing(6)
+                head_h.setSpacing(10)
                 st_lbl = QLabel(sub_name or "（未命名项目）")
                 st_lbl.setStyleSheet("color:#1F2329;")
-                st_lbl.setFont(_pfn_qfont_pt(9, True))
+                st_lbl.setFont(_pfn_qfont_pt(10, True))
                 st_lbl.setToolTip("右键 → 编辑时间节点")
                 head_h.addWidget(st_lbl, 0)
+                # 项目名与时间节点标签之间增加呼吸感，避免贴得太近
+                head_h.addSpacing(8)
+                important_ms = {"DDL", "DBL", "FPI", "LPLV", "DBLOCK", "DB LOCK", "DBL锁库", "锁库", "期中分析", "CSR"}
                 for m in _pfn_normalize_milestones(info_b.get("milestones")):
                     try:
-                        chip = QLabel(f"[{m['name']}：{m['date']}]")
-                        chip.setStyleSheet(
-                            "color:#86909C; background:#E8EAED; padding:1px 6px; border-radius:5px;"
-                        )
-                        chip.setFont(_pfn_qfont_pt(7))
+                        ms_name = str(m.get("name", "") or "").strip()
+                        chip = QLabel(f"[{ms_name}：{m['date']}]")
+                        if ms_name.upper() in important_ms:
+                            chip.setStyleSheet(
+                                "color:#165DFF; background:#EAF3FF; border:1px solid #B7D1FF; padding:3px 10px; border-radius:7px;"
+                            )
+                            chip.setFont(_pfn_qfont_pt(8, True))
+                        else:
+                            chip.setStyleSheet(
+                                "color:#86909C; background:#E8EAED; border:none; padding:2px 8px; border-radius:6px;"
+                            )
+                            chip.setFont(_pfn_qfont_pt(8))
                         chip.setToolTip("")
                         chip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
                         head_h.addWidget(chip, 0)
@@ -4199,10 +4614,87 @@ class QtMainWindow(QMainWindow):
             pass
         self._refresh_project_management_panel()
 
+    def _on_personal_todo_checkbox_toggled(self, task_id: str, checked: bool):
+        setter = getattr(self.core.config, "update_personal_task", None)
+        if not callable(setter):
+            return
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        patch = {"status": "已完成" if checked else "未完成", "completed_at": now if checked else ""}
+        if setter(task_id, patch):
+            self._rebuild_todo_panel()
+
+    def _on_personal_todo_add_clicked(self):
+        dlg = PersonalTodoTaskEditDialog(self, "添加个人任务", None)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        content = dlg.get_content()
+        if not content:
+            return
+        done = dlg.is_done()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        item = {
+            "id": str(uuid.uuid4()),
+            "content": content,
+            "created_at": now,
+            "status": "已完成" if done else "未完成",
+            "completed_at": now if done else "",
+            "priority": dlg.get_priority(),
+            "due_date": dlg.get_due_date(),
+        }
+        adder = getattr(self.core.config, "add_personal_task", None)
+        if callable(adder) and adder(item):
+            self._rebuild_todo_panel()
+
+    def _open_personal_todo_task_editor(self, task_id: str):
+        getter = getattr(self.core.config, "get_personal_tasks", None)
+        updater = getattr(self.core.config, "update_personal_task", None)
+        if not callable(getter) or not callable(updater):
+            return
+        target = None
+        for t in (getter() or []):
+            if isinstance(t, dict) and str(t.get("id", "")) == str(task_id):
+                target = dict(t)
+                break
+        if target is None:
+            return
+        dlg = PersonalTodoTaskEditDialog(self, "编辑个人任务", target)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        content = dlg.get_content()
+        if not content:
+            return
+        done = dlg.is_done()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        patch = {
+            "content": content,
+            "priority": dlg.get_priority(),
+            "due_date": dlg.get_due_date(),
+            "status": "已完成" if done else "未完成",
+            "completed_at": now if done else "",
+        }
+        if updater(task_id, patch):
+            self._rebuild_todo_panel()
+
+    def _on_personal_todo_row_context_menu(self, source_widget, task_id: str, pos):
+        menu = QMenu(self)
+        act_edit = menu.addAction("编辑任务")
+        act_del = menu.addAction("删除任务")
+        _style_pfn_context_menu(menu)
+        action = menu.exec(source_widget.mapToGlobal(pos))
+        if action is None:
+            return
+        if action == act_edit:
+            self._open_personal_todo_task_editor(task_id)
+        elif action == act_del:
+            deleter = getattr(self.core.config, "delete_personal_task", None)
+            if callable(deleter) and deleter(task_id):
+                self._rebuild_todo_panel()
+
     def _on_todo_row_context_menu(self, source_widget, sub_key: str, task_id: str, pos):
         menu = QMenu(self)
         act_edit = menu.addAction("编辑任务")
         act_del = menu.addAction("删除任务")
+        _style_pfn_context_menu(menu)
         action = menu.exec(source_widget.mapToGlobal(pos))
         if action is None:
             return
@@ -4809,6 +5301,7 @@ class QtMainWindow(QMainWindow):
             return
         menu = QMenu(self)
         act_ms = menu.addAction("编辑时间节点…")
+        _style_pfn_context_menu(menu)
         act = menu.exec(w.mapToGlobal(pos))
         if act != act_ms:
             return
@@ -6077,6 +6570,7 @@ class QtMainWindow(QMainWindow):
             act_del = None
             if product_favs:
                 act_del = menu.addAction("删除产品下全部子项目")
+            _style_pfn_context_menu(menu)
             act = menu.exec(self.fav_tree.mapToGlobal(pos))
             _restore_prev_state_if_no_action(act)
             if act == act_unpin:
@@ -6133,6 +6627,7 @@ class QtMainWindow(QMainWindow):
             act_p_l = priority_menu.addAction("低")
             act_edit_task = menu.addAction("编辑项目任务")
             act_del = menu.addAction("删除本试验下全部子项目")
+            _style_pfn_context_menu(menu)
             action = menu.exec(self.fav_tree.mapToGlobal(pos))
             _restore_prev_state_if_no_action(action)
             # 关键：未选择任何菜单项（点空白/ESC）时，必须直接退出。
@@ -6219,6 +6714,7 @@ class QtMainWindow(QMainWindow):
                 if ref and self._is_pinned(ref[0], ref[1]):
                     act_pin.setEnabled(False)
                 act_del = menu.addAction("删除子项目")
+            _style_pfn_context_menu(menu)
             act = menu.exec(self.fav_tree.mapToGlobal(pos))
             _restore_prev_state_if_no_action(act)
             if act == act_open:
@@ -6252,6 +6748,7 @@ class QtMainWindow(QMainWindow):
             p_path = os.path.normpath(str(pin.get("path", ""))).replace("/", "\\")
             act_open = menu.addAction("打开所在文件夹")
             act_unpin = menu.addAction("取消置顶")
+            _style_pfn_context_menu(menu)
             act = menu.exec(self.fav_tree.mapToGlobal(pos))
             _restore_prev_state_if_no_action(act)
             if act == act_open and p_path:
@@ -6269,6 +6766,7 @@ class QtMainWindow(QMainWindow):
             if ref and self._is_pinned(ref[0], ref[1]):
                 act_pin.setEnabled(False)
             act_del = menu.addAction("删除整个项目")
+            _style_pfn_context_menu(menu)
             act = menu.exec(self.fav_tree.mapToGlobal(pos))
             _restore_prev_state_if_no_action(act)
             if act == act_open:
@@ -6383,7 +6881,9 @@ class QtMainWindow(QMainWindow):
                 else:
                     p = os.path.normpath(os.path.join(base, rel)).replace("/", "\\")
                     self._add_folder_node(disp, p)
-            if not is_users:
+            if is_users:
+                self.tree.addTopLevelItem(self._build_documentations_node_users(base))
+            else:
                 docs_root = self._build_documents_node(base)
                 self.tree.addTopLevelItem(docs_root)
             pid = self.current_fav["id"]
@@ -6506,7 +7006,7 @@ class QtMainWindow(QMainWindow):
         typ = item.data(1, Qt.ItemDataRole.UserRole)
         if not path or typ in ["dir_placeholder", "unavailable"]:
             return
-        if typ == "dir":
+        if typ in ("dir", "docs_root", "documentations_root"):
             return
         path = os.path.normpath(path).replace("/", "\\")
         if path.lower().endswith(".pdf"):
@@ -7770,6 +8270,7 @@ class QtMainWindow(QMainWindow):
             if first_group3:
                 menu.insertSeparator(first_group3)
 
+        _style_pfn_context_menu(menu)
         act = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if act_open_selected and act == act_open_selected:
             # 若是多选：逐个按系统默认方式打开；若是单选：按双击逻辑打开
@@ -8195,7 +8696,9 @@ class QtMainWindow(QMainWindow):
         if not os.path.isdir(folder_path):
             QMessageBox.warning(self, "提示", "目标不是有效文件夹或无法访问。")
             return
-        is_docs_root = (item.data(1, Qt.ItemDataRole.UserRole) == "docs_root")
+        node_typ = item.data(1, Qt.ItemDataRole.UserRole)
+        is_docs_root = node_typ == "docs_root"
+        is_documentations_root = node_typ == "documentations_root"
         while item.childCount():
             item.removeChild(item.child(0))
         loading = QTreeWidgetItem(["加载中…", ""])
@@ -8220,6 +8723,12 @@ class QtMainWindow(QMainWindow):
                 # Documents 节点刷新：仅展示全部 xlsx 文件（不展示其它后缀与子目录）。
                 if is_docs_root:
                     if is_dir or not n.lower().endswith(".xlsx"):
+                        continue
+                    result.append((n, p, False))
+                    continue
+                # users 下 Documents（documentations_root）：仅展示该目录下的文件（不展示子目录）。
+                if is_documentations_root:
+                    if is_dir:
                         continue
                     result.append((n, p, False))
                     continue
