@@ -2395,6 +2395,7 @@ class QtMainWindow(QMainWindow):
         left.setMaximumWidth(280)
         left.setStyleSheet("background:#FAFBFC; border-right:1px solid #E5E6EB;")
         left_layout = QVBoxLayout(left)
+        left_layout.setSpacing(8)
         self.utility_path = os.path.normpath("Z:\\projects\\utility").replace("/", "\\")
         utility_frame = QFrame()
         utility_frame.setStyleSheet(
@@ -2404,12 +2405,8 @@ class QtMainWindow(QMainWindow):
         )
         utility_frame.setObjectName("utilityFrame")
         utility_frame.setCursor(Qt.CursorShape.PointingHandCursor)
-        util_shadow = QGraphicsDropShadowEffect()
-        util_shadow.setBlurRadius(4)
-        util_shadow.setXOffset(0)
-        util_shadow.setYOffset(2)
-        util_shadow.setColor(QColor(0, 0, 0, 13))
-        utility_frame.setGraphicsEffect(util_shadow)
+        # 去掉卡片阴影，避免某些缩放比例下出现右侧竖线伪影
+        utility_frame.setGraphicsEffect(None)
         utility_layout = QHBoxLayout(utility_frame)
         utility_layout.setContentsMargins(12, 8, 12, 8)
         utility_label = QLabel("Utility 公共目录")
@@ -2425,18 +2422,14 @@ class QtMainWindow(QMainWindow):
         header.setContentsMargins(0, 0, 0, 0)
         fav_card = QFrame()
         fav_card.setStyleSheet(
-            "QFrame#favCard { background:#F6F8FB; border:1px solid #E5EAF2; border-radius:10px; padding:7px 11px; } "
+            "QFrame#favCard { background:#F6F8FB; border:1px solid #E5EAF2; border-radius:9px; padding:6px 10px; } "
             "QFrame#favCard:hover { background:#EEF3FA; border-color:#C7D5EA; } "
         )
         fav_card.setObjectName("favCard")
-        fav_shadow = QGraphicsDropShadowEffect()
-        fav_shadow.setBlurRadius(6)
-        fav_shadow.setXOffset(0)
-        fav_shadow.setYOffset(1)
-        fav_shadow.setColor(QColor(0, 0, 0, 20))
-        fav_card.setGraphicsEffect(fav_shadow)
+        # 去掉卡片阴影，避免某些缩放比例下出现右侧竖线伪影
+        fav_card.setGraphicsEffect(None)
         fav_layout = QHBoxLayout(fav_card)
-        fav_layout.setContentsMargins(10, 7, 12, 7)
+        fav_layout.setContentsMargins(9, 6, 11, 6)
         fav_layout.setSpacing(6)
         logo_lbl = QLabel()
         logo_lbl.setObjectName("pmHeaderLogo")
@@ -2451,7 +2444,7 @@ class QtMainWindow(QMainWindow):
         title = QLabel("项目管理栏")
         title.setObjectName("favTitle")
         title.setStyleSheet(
-            "QLabel#favTitle{ font-family:'Microsoft YaHei'; font-size:14px; font-weight:600; color:#3B4758; background:transparent; } "
+            "QLabel#favTitle{ font-family:'Microsoft YaHei'; font-size:12px; font-weight:500; color:#3B4758; background:transparent; } "
             "QLabel#favTitle:hover{ color:#165DFF; } "
         )
         title.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2460,9 +2453,9 @@ class QtMainWindow(QMainWindow):
         header.addWidget(fav_card)
         header.addStretch()
         add_btn = QPushButton("+ 添加项目")
-        add_btn.setFixedHeight(34)
+        add_btn.setFixedHeight(36)
         add_btn.setStyleSheet(
-            "QPushButton{background:#165DFF; color:white; border:1px solid #165DFF; border-radius:9px; font-size:12px; font-weight:600; padding:8px 16px;} "
+            "QPushButton{background:#165DFF; color:white; border:1px solid #165DFF; border-radius:9px; font-size:12px; font-weight:600; padding:10px 18px;} "
             "QPushButton:hover{background:#3C7CFF; border-color:#3C7CFF;} "
             "QPushButton:pressed{background:#0E42D2; border-color:#0E42D2;} "
             "QPushButton:disabled{background:#AFC8FF; border-color:#AFC8FF; color:#EAF1FF;}"
@@ -2478,14 +2471,15 @@ class QtMainWindow(QMainWindow):
         header.addWidget(add_btn)
         fav_card.mousePressEvent = lambda e: self._on_left_pm_header_clicked()
         left_layout.addLayout(header)
+        left_layout.addSpacing(4)
 
         # 搜索栏 + 扁平下拉列表
         self.fav_search_edit = QLineEdit()
         self.fav_search_edit.setPlaceholderText("搜索项目")
         self.fav_search_edit.setClearButtonEnabled(True)
-        self.fav_search_edit.setFixedHeight(26)
+        self.fav_search_edit.setFixedHeight(28)
         self.fav_search_edit.setStyleSheet(
-            "QLineEdit{border:1px solid #D0D3D8; border-radius:4px; padding:2px 8px; font-size:11px;}"
+            "QLineEdit{border:1px solid #D0D3D8; border-radius:4px; padding:4px 10px; font-size:11px;}"
             "QLineEdit:focus{border-color:#165DFF;}"
         )
         left_layout.addWidget(self.fav_search_edit)
@@ -3041,7 +3035,7 @@ class QtMainWindow(QMainWindow):
         self.todo_inner_tabs.setDocumentMode(True)
         self.todo_inner_tabs.setStyleSheet(
             "QTabWidget{background:transparent;}"
-            "QTabWidget::pane{border:none; background:transparent;}"
+            "QTabWidget::pane{border:1px solid #E8ECF3; background:#F7F9FC; border-radius:10px; top:4px;}"
             "QTabBar::tab{padding:4px 12px; margin-right:6px; border:1px solid #E5E6EB; border-radius:8px; color:#4E5969; background:#F7F8FA; font-size:11px; font-weight:500;}"
             "QTabBar::tab:selected{color:#165DFF; border-color:#BCD4FF; background:#EEF4FF; font-size:12px; font-weight:600;}"
         )
@@ -3106,7 +3100,7 @@ class QtMainWindow(QMainWindow):
 
         self.todo_scroll.setWidget(self.todo_cont)
         self.todo_inner_tabs.widget(0).setLayout(QVBoxLayout())
-        self.todo_inner_tabs.widget(0).layout().setContentsMargins(0, 0, 0, 0)
+        self.todo_inner_tabs.widget(0).layout().setContentsMargins(0, 8, 0, 0)
         self.todo_inner_tabs.widget(0).layout().addWidget(self.todo_scroll, 1)
 
         self.personal_todo_scroll = QScrollArea()
@@ -3124,7 +3118,7 @@ class QtMainWindow(QMainWindow):
         self.personal_todo_layout.setSpacing(8)
         self.personal_todo_scroll.setWidget(self.personal_todo_cont)
         self.todo_inner_tabs.widget(1).setLayout(QVBoxLayout())
-        self.todo_inner_tabs.widget(1).layout().setContentsMargins(0, 0, 0, 0)
+        self.todo_inner_tabs.widget(1).layout().setContentsMargins(0, 8, 0, 0)
         self.todo_inner_tabs.widget(1).layout().addWidget(self.personal_todo_scroll, 1)
 
         # 待办产品拖拽状态（自定义重排，不用 QDrag）
