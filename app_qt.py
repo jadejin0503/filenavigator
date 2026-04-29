@@ -973,6 +973,20 @@ class SingleTodoTaskEditDialog(QDialog):
         row.addWidget(self.combo_pri, 1)
         lay.addLayout(row)
 
+        row_due = QHBoxLayout()
+        row_due.addWidget(QLabel("截止日期"))
+        self.date_due = QDateEdit()
+        self.date_due.setCalendarPopup(True)
+        self.date_due.setDisplayFormat("yyyy-MM-dd")
+        self.date_due.setDate(QDate.currentDate())
+        self.date_due.setKeyboardTracking(False)
+        row_due.addWidget(self.date_due, 1)
+        self.chk_no_due = QCheckBox("不设置日期")
+        self.chk_no_due.setChecked(True)
+        row_due.addWidget(self.chk_no_due, 0)
+        self.chk_no_due.toggled.connect(lambda x: self.date_due.setEnabled(not bool(x)))
+        lay.addLayout(row_due)
+
         self.chk_done = QCheckBox("标记为已完成")
         done = False
         if task_dict and isinstance(task_dict, dict):
@@ -982,7 +996,14 @@ class SingleTodoTaskEditDialog(QDialog):
             else:
                 s = str(s or "").strip()
                 done = s in ("已完成", "完成", "done", "Done", "DONE")
+            due = str(task_dict.get("due_date", "") or "").strip()
+            if due:
+                qd = QDate.fromString(due, "yyyy-MM-dd")
+                if qd.isValid():
+                    self.date_due.setDate(qd)
+                    self.chk_no_due.setChecked(False)
         self.chk_done.setChecked(done)
+        self.date_due.setEnabled(not self.chk_no_due.isChecked())
         lay.addWidget(self.chk_done)
 
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
@@ -1000,6 +1021,11 @@ class SingleTodoTaskEditDialog(QDialog):
 
     def is_done(self):
         return self.chk_done.isChecked()
+
+    def get_due_date(self):
+        if self.chk_no_due.isChecked():
+            return ""
+        return str(self.date_due.date().toString("yyyy-MM-dd") or "").strip()
 
 
 class PersonalTodoTaskEditDialog(QDialog):
@@ -2534,6 +2560,7 @@ class QtMainWindow(QMainWindow):
 
         self.pm_tabs = QTabWidget()
         self.pm_tabs.setDocumentMode(True)
+        self.pm_tabs.tabBar().setCursor(Qt.CursorShape.PointingHandCursor)
         self.pm_tabs.setStyleSheet(
             # 容器：浅灰底 + 白色内容卡片
             "QTabWidget{background:#F6F7FB;}"
@@ -3033,6 +3060,7 @@ class QtMainWindow(QMainWindow):
 
         self.todo_inner_tabs = QTabWidget()
         self.todo_inner_tabs.setDocumentMode(True)
+        self.todo_inner_tabs.tabBar().setCursor(Qt.CursorShape.PointingHandCursor)
         self.todo_inner_tabs.setStyleSheet(
             "QTabWidget{background:transparent;}"
             "QTabWidget::pane{border:1px solid #E8ECF3; background:#F7F9FC; border-radius:10px; top:4px;}"
@@ -3864,6 +3892,7 @@ class QtMainWindow(QMainWindow):
                 "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "status": "未完成",
                 "completed_at": "",
+                "due_date": "",
             }
         if not isinstance(t, dict):
             return None
@@ -3879,6 +3908,10 @@ class QtMainWindow(QMainWindow):
             out["priority"] = "中"
         st = self._normalize_task_status(out)
         out["status"] = "已完成" if st == "已完成" else "未完成"
+        due = str(out.get("due_date", "") or "").strip()
+        if due and not re.match(r"^\d{4}-\d{2}-\d{2}$", due):
+            due = ""
+        out["due_date"] = due
         return out
 
     def _todo_effective_priority(self, task: dict, info: dict) -> str:
@@ -4321,6 +4354,8 @@ class QtMainWindow(QMainWindow):
             empty.setFont(_pfn_qfont_pt(10))
             self.todo_layout.addWidget(empty)
 
+        today_s = datetime.now().strftime("%Y-%m-%d")
+
         # 三层展示：产品卡片 -> 子项目分组 -> 任务（无任务或未通过筛选的子项目不显示）
         # 产品顺序：优先使用 config.json.product_order；其余按字母追加
         try:
@@ -4414,21 +4449,14 @@ class QtMainWindow(QMainWindow):
                 head_h.addWidget(st_lbl, 0)
                 # 项目名与时间节点标签之间增加呼吸感，避免贴得太近
                 head_h.addSpacing(8)
-                important_ms = {"DDL", "DBL", "FPI", "LPLV", "DBLOCK", "DB LOCK", "DBL锁库", "锁库", "期中分析", "CSR"}
                 for m in _pfn_normalize_milestones(info_b.get("milestones")):
                     try:
                         ms_name = str(m.get("name", "") or "").strip()
                         chip = QLabel(f"[{ms_name}：{m['date']}]")
-                        if ms_name.upper() in important_ms:
-                            chip.setStyleSheet(
-                                "color:#165DFF; background:#EAF3FF; border:1px solid #B7D1FF; padding:3px 10px; border-radius:7px;"
-                            )
-                            chip.setFont(_pfn_qfont_pt(8, True))
-                        else:
-                            chip.setStyleSheet(
-                                "color:#86909C; background:#E8EAED; border:none; padding:2px 8px; border-radius:6px;"
-                            )
-                            chip.setFont(_pfn_qfont_pt(8))
+                        chip.setStyleSheet(
+                            "color:#165DFF; background:#EAF3FF; border:1px solid #B7D1FF; padding:3px 10px; border-radius:7px;"
+                        )
+                        chip.setFont(_pfn_qfont_pt(8, True))
                         chip.setToolTip("")
                         chip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
                         head_h.addWidget(chip, 0)
@@ -4455,7 +4483,10 @@ class QtMainWindow(QMainWindow):
                     content = str((task or {}).get("content", "") or "").strip() or "（无内容）"
                     created = str((task or {}).get("created_at", "") or "")
                     pri = self._todo_effective_priority(task, info)
+                    due = str((task or {}).get("due_date", "") or "").strip()
                     is_done = self._normalize_task_status(task) == "已完成"
+                    is_overdue = bool(due and due < today_s and not is_done)
+                    is_due_today = bool(due and due == today_s and not is_done)
 
                     row_w = QWidget()
                     row_w.setStyleSheet("background: transparent;")
@@ -4488,11 +4519,28 @@ class QtMainWindow(QMainWindow):
                     body = QLabel(content)
                     body.setWordWrap(True)
                     body.setFont(_pfn_qfont_pt(9))
-                    body.setStyleSheet("color:#86909C;" if is_done else "color:#1F2329;")
+                    if is_done:
+                        body.setStyleSheet("color:#86909C;")
+                    elif is_overdue:
+                        body.setStyleSheet("color:#D03050;")
+                    elif is_due_today:
+                        body.setStyleSheet("color:#B75A00;")
+                    else:
+                        body.setStyleSheet("color:#1F2329;")
                     body.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
-                    meta = QLabel(f"创建：{created}  ·  优先级：{pri}")
-                    meta.setStyleSheet("color:#C9CDD4;" if is_done else "color:#86909C;")
+                    meta_parts = [f"创建：{created}", f"优先级：{pri}"]
+                    if due:
+                        meta_parts.append(f"截止：{due}")
+                    meta = QLabel("  ·  ".join(meta_parts))
+                    if is_done:
+                        meta.setStyleSheet("color:#C9CDD4;")
+                    elif is_overdue:
+                        meta.setStyleSheet("color:#D03050;")
+                    elif is_due_today:
+                        meta.setStyleSheet("color:#B75A00;")
+                    else:
+                        meta.setStyleSheet("color:#86909C;")
                     meta.setFont(_pfn_qfont_pt(8))
                     meta.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
@@ -5220,6 +5268,7 @@ class QtMainWindow(QMainWindow):
                 pass
             return
         pri = dlg.get_priority()
+        due = dlg.get_due_date()
         done = dlg.is_done()
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         changed = False
@@ -5228,6 +5277,7 @@ class QtMainWindow(QMainWindow):
                 continue
             t["content"] = content
             t["priority"] = pri
+            t["due_date"] = due
             if done:
                 t["status"] = "已完成"
                 if not str(t.get("completed_at", "") or "").strip():
@@ -5268,6 +5318,7 @@ class QtMainWindow(QMainWindow):
                     "status": old.get("status", "未完成"),
                     "completed_at": old.get("completed_at", ""),
                     "priority": op,
+                    "due_date": str(old.get("due_date", "") or "").strip(),
                 })
             else:
                 new_tasks.append({
@@ -5277,6 +5328,7 @@ class QtMainWindow(QMainWindow):
                     "status": "未完成",
                     "completed_at": "",
                     "priority": sub_pri,
+                    "due_date": "",
                 })
         setter(sub_key, tasks=new_tasks, milestones=milestones)
         try:
@@ -5344,6 +5396,7 @@ class QtMainWindow(QMainWindow):
         if not content:
             return
         pri = dlg.get_priority()
+        due = dlg.get_due_date()
         done = dlg.is_done()
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         tasks = list(info.get("tasks", []) or [])
@@ -5354,6 +5407,7 @@ class QtMainWindow(QMainWindow):
             "status": "已完成" if done else "未完成",
             "completed_at": now if done else "",
             "priority": pri,
+            "due_date": due,
         }
         tasks.append(nt)
         setter = getattr(self.core.config, "upsert_subproject", None)
