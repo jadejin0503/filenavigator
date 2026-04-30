@@ -8258,7 +8258,7 @@ class QtMainWindow(QMainWindow):
         act_adobe = act_browser = None
         act_default_eg = act_default_vscode = None
         act_open_folder = act_copy_path = act_copy_names = act_copy_files = None
-        act_paste = act_rename_file = act_delete_files = None
+        act_paste = act_new_folder = act_rename_file = act_delete_files = None
         act_refresh_folder = act_sort_by_time = None
 
         # 第 1 组：打开操作类
@@ -8303,6 +8303,10 @@ class QtMainWindow(QMainWindow):
         if target_dir and os.path.isdir(target_dir) and self._check_clipboard_has_files():
             act_paste = menu.addAction("粘贴")
             act_paste.setData(target_dir)
+        # 新建文件夹：仅对“真实目录”节点开放；排除自定义 documentation 下拉（documentations_root）
+        if is_folder and typ != "documentations_root":
+            act_new_folder = menu.addAction("新建文件夹…")
+            act_new_folder.setData((path, typ))
         if is_file:
             act_rename_file = menu.addAction("重命名")
             act_delete_files = menu.addAction("删除选中文件")
@@ -8311,13 +8315,13 @@ class QtMainWindow(QMainWindow):
             act_refresh_folder.setData(path)
             act_sort_by_time = menu.addAction("按时间排序查看文件")
             act_sort_by_time.setData(path)
-        group3_has_item = any([act_paste, act_rename_file, act_delete_files, act_refresh_folder, act_sort_by_time])
+        group3_has_item = any([act_paste, act_new_folder, act_rename_file, act_delete_files, act_refresh_folder, act_sort_by_time])
 
         # 分组分隔线（仅在相邻分组均有项时显示）
         if group1_has_item and group2_has_item:
             menu.insertSeparator(act_copy_path)
         if group2_has_item and group3_has_item:
-            first_group3 = next((a for a in [act_paste, act_rename_file, act_delete_files, act_refresh_folder, act_sort_by_time] if a), None)
+            first_group3 = next((a for a in [act_paste, act_new_folder, act_rename_file, act_delete_files, act_refresh_folder, act_sort_by_time] if a), None)
             if first_group3:
                 menu.insertSeparator(first_group3)
 
@@ -8383,6 +8387,8 @@ class QtMainWindow(QMainWindow):
             self._delete_selected_files()
         elif act_paste and act == act_paste:
             self._paste_files_to_folder(act_paste.data())
+        elif act_new_folder and act == act_new_folder:
+            self._create_new_folder_under(path, item)
         elif act_refresh_folder and act == act_refresh_folder:
             self._refresh_folder_node(act_refresh_folder.data(), item)
         elif act_sort_by_time and act == act_sort_by_time:
@@ -8444,6 +8450,55 @@ class QtMainWindow(QMainWindow):
         elif act_default_vscode and act == act_default_vscode:
             self.core.config.set_sas_open(default_app="vscode")
             self.statusBar().showMessage("默认打开方式已设为 VS Code，生效于本次及之后打开", 3000)
+
+    def _create_new_folder_under(self, folder_path: str, item: QTreeWidgetItem):
+        folder_path = os.path.normpath(str(folder_path or "")).replace("/", "\\")
+        if not folder_path or not os.path.isdir(folder_path):
+            QMessageBox.warning(self, "新建文件夹", "目标不是有效文件夹或无法访问。")
+            return
+        # users 下自定义 documentation 下拉：不支持创建文件夹
+        try:
+            node_typ = item.data(1, Qt.ItemDataRole.UserRole)
+            if node_typ == "documentations_root":
+                QMessageBox.information(self, "新建文件夹", "该位置不支持新建文件夹。")
+                return
+        except Exception:
+            pass
+        name, ok = QInputDialog.getText(self, "新建文件夹", f"在以下位置创建子文件夹：\n{folder_path}\n\n文件夹名称：")
+        if not ok:
+            return
+        name = str(name or "").strip()
+        if not name:
+            return
+        invalid_chars = set('<>:"/\\|?*')
+        if any(ch in invalid_chars for ch in name):
+            QMessageBox.warning(self, "新建文件夹", "名称包含非法字符：<>:\"/\\|?*")
+            return
+        # Windows：末尾不能为点或空格
+        if name.endswith(".") or name.endswith(" "):
+            QMessageBox.warning(self, "新建文件夹", "名称不能以“.”或空格结尾。")
+            return
+        new_path = os.path.normpath(os.path.join(folder_path, name)).replace("/", "\\")
+        if os.path.exists(new_path):
+            QMessageBox.information(self, "新建文件夹", "同名文件夹已存在。")
+            return
+        try:
+            os.makedirs(new_path, exist_ok=False)
+        except PermissionError:
+            QMessageBox.warning(self, "新建文件夹", "权限不足，无法创建文件夹。")
+            return
+        except Exception as e:
+            QMessageBox.warning(self, "新建文件夹", f"创建失败：{e}")
+            return
+        try:
+            self.statusBar().showMessage(f"已创建文件夹：{name}", 2500)
+        except Exception:
+            pass
+        # 刷新当前节点，确保新建文件夹显示出来（不自动选中）
+        try:
+            self._refresh_folder_node(folder_path, item)
+        except Exception:
+            pass
 
     def _set_clipboard_files_win(self, file_paths):
         """将文件路径以 CF_HDROP 格式写入系统剪贴板，使资源管理器或本工具中「粘贴」可复制文件。仅 Windows。"""
