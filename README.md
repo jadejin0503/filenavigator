@@ -10,8 +10,8 @@
 |------|------|
 | **项目管理栏** | 左侧树：按 projects / unblinded / users 分类；支持「产品 → 试验 → 子目录」层级、搜索定位、添加/删除、打开所在文件夹；标题区可切回待办/分析。 |
 | **右侧视图** | 无左侧选中：显示「我的待办 / 项目数据分析」；有选中且可解析为收藏目录：显示文件树。见下文「归类规则」。 |
-| **右侧文件树** | 对**收藏项**（`config` 中有对应记录）展示按项目类型归类的聚合目录；支持双击/右键打开、显示修改时间。 |
-| **添加项目** | 对话框支持三目录（projects / unblinded / users）按**产品**搜索与快速定位；可多选目录并自动解析为产品/试验加入收藏；支持覆盖/跳过已存在路径。 |
+| **右侧文件树** | 对**收藏项**（`config` 中有对应记录）展示按项目类型归类的聚合目录；支持双击/右键打开、显示修改时间；**.doc/.docx/.rtf** 可多选后右键「转换为 PDF」（同目录生成独立 PDF，需本机安装 Microsoft Word）；**可将选中文件或文件夹拖出窗口**，拖到桌面或资源管理器等位置，由系统完成复制/移动。 |
+| **添加项目** | 对话框支持三目录（projects / unblinded / users）按**产品**搜索与快速定位；**搜索结果优先展示「文件夹名以关键词结尾」等更相关项**，下拉列表与树定位时**将匹配项滚到可视区域顶部**；可多选目录并自动解析为产品/试验加入收藏；支持覆盖/跳过已存在路径。 |
 | **SAS EG 集成** | .sas 与 SAS 数据集（.sas7bdat/.sas7bndx/.sas7bcat/.sd2）差异化打开：`.sas` 走 EG 自动化展开；数据集直接调用 `SEGuide.exe` 传参打开。 |
 | **代码/文档打开** | `.sas` 保留 SAS EG / VS Code；SAS 数据集仅 SAS EG；PDF 可选默认查看器。 |
 | **Utility 公共目录** | 左侧固定入口，点击后在右侧展示 `Z:\projects\utility` 目录树。 |
@@ -53,11 +53,16 @@
 - **program 聚合过滤**：`program`（`06_programs` / `09_validation`）目录树内仅展示 `.sas` 程序文件，隐藏 `.lst`、`.txt` 等非 SAS 文件。
 - **Documents 展示策略**：初次展开仅显示“常用 xlsx”；对 `Documents` 节点执行刷新后，切换为展示该目录下“全部 xlsx”。
 - **列**：第一列为名称，第二列为修改时间（右对齐、灰色）。
+- **拖放到系统文件夹**：在右侧文件树中可多选本地存在的文件或文件夹，按住左键拖出应用窗口，可放到桌面、资源管理器其它目录或支持文件拖放的应用中；松手后的复制/移动与系统资源管理器行为一致（单文件拖拽时沿用界面同款文件图标作为拖拽缩略图）。
 
 ### 4. 添加项目
 
 - 对话框从 **Z 盘根** 懒加载：先显示 projects / unblinded / users，展开后加载子目录。
 - **users** 下展开到 userid 后显示 `projects`、`unblinded`，再进入具体路径。
+- **产品搜索**：
+  - 输入关键词后，下拉结果在「命中强弱、来源（projects / unblinded / users）」排序基础上，**优先将「规范化后的产品文件夹名以关键词结尾」的项排在前面**（例如搜 `5965` 时更易将 `HRS5965` 排在列表前部），再辅以完全匹配、名称长度与字母序。
+  - 每次刷新下拉列表后会**滚回列表顶部**，保证当前最优匹配（第 1 条）出现在可视区域最上方。
+  - 从下拉选择或回车确认跳转后，右侧树会**将目标节点滚到可视区域顶部**（`PositionAtTop`），避免仅「保证可见」而把高亮项挤在视口最下方。
 - 多选目录后，按路径解析为「产品 → 试验 → 子目录」并写入收藏；可选覆盖已存在路径。
 - 支持 Z 盘路径如 `Z:\projects\...`、`Z:\users\userid\unblinded\...` 等。
 
@@ -96,9 +101,10 @@
 
 ### 7. 配置
 
-- **开发环境**：`config.json` 位于项目目录。
-- **打包后**：`config.json` 位于 `%APPDATA%\PFN\`，便于分发给他人时不含开发者个人收藏。
-- **内容**：`favorite_projects`（收藏列表）、`match_rules`（文档匹配规则）、`fixed_paths`（右侧固定展示路径）、`sas_open`（.sas 默认打开方式及编码）等。
+- **统一位置（开发与打包一致）**：`config.json` 固定为 **`%USERPROFILE%\PFN_Config\config.json`**（在默认用户目录布局下即 **`C:\Users\<当前 Windows 登录名>\PFN_Config\config.json`**）。收藏、待办、`project_management`、个人待办附件元数据等均读写此文件；个人待办附件文件在同目录下的 **`PFN_Data\personal_task_attachments\`**。
+- **版本升级**：更换或移动 `PFN.exe` 不影响上述路径中的数据；只要在同一 Windows 用户下运行，即沿用同一配置。
+- **从旧版迁移**：若你曾在 **exe 旁** 或 **项目目录** 使用过另一份 `config.json`，请将该文件（及同目录 **`PFN_Data`** 文件夹，若有）**复制到** `%USERPROFILE%\PFN_Config\`，覆盖或合并后再启动新版本。
+- **内容**：`favorite_projects`（收藏列表）、`match_rules`（文档匹配规则）、`fixed_paths`（右侧固定展示路径）、`sas_open`（.sas 默认打开方式及编码）、`personal_tasks`、`project_management` 等。
 
 ---
 
@@ -128,20 +134,16 @@ python app_qt.py
 
 在项目根目录执行 **`build.bat`**（或 `pyinstaller build.spec`），生成 **`PFN_app\PFN.exe`**：无控制台、单文件可任意路径运行。建议将同目录下的 **`icon.ico`** 一并分发给对方（脚本会自动复制到 `PFN_app\`）。
 
-### config.json 查找优先级（适配「仅复制 exe 到桌面」）
+### config.json 位置（固定用户目录）
 
-程序按以下顺序找配置，**仅复制 exe 到桌面也能自动找到原来的收藏**（只要曾在「有 config 的目录」运行过一次）：
+程序**始终**使用当前 Windows 用户下的：
 
-| 优先级 | 位置 | 说明 |
-|--------|------|------|
-| 1 | **程序运行目录**（exe 所在目录）的 `config.json` | 与原有逻辑一致；若把 exe 和 config 放同一文件夹，优先用这份。 |
-| 2 | **上次使用过的 config 所在目录** | 程序会记住「上次读到的 config 在哪个目录」（记在 `%APPDATA%\PFN\pfn_config_dir.txt`）。把 exe 单独复制到桌面后，若运行目录没有 config，会自动去该目录找（通常是 `PFN_app` 或项目目录），收藏不丢失。 |
-| 3 | **C:\Users\\<当前用户名>\PFN_Config\config.json** | 若 1、2 都没有，则在此创建空配置；新用户添加的项目会保存在这里。 |
+`%USERPROFILE%\PFN_Config\config.json`
 
-- **本机：复制 exe 到桌面** → 先在 **`PFN_app`**（或带 config 的目录）运行一次 PFN.exe，再只把 **PFN.exe** 拷到桌面；之后点桌面的 exe，会自动用原目录里的 config，项目不会丢。若希望桌面单独一份配置，可在桌面建文件夹并放入 **PFN.exe + config.json**，则优先用桌面这份。
-- **发给别人**：
-  - 只发 **PFN.exe** 一个文件 → 对方会走优先级 3，在其 `C:\Users\<对方用户名>\PFN_Config\config.json` 下生成空配置，**不会看到你的项目**。
-  - 若同时把你的 **config.json** 与 exe 放同一目录一起发 → 对方会走优先级 1，**直接使用你提供的配置**（等同带走你的收藏与设置）。
+（一般为 `C:\Users\<你的登录名>\PFN_Config\config.json`）。首次运行若不存在会自动创建。打包升级 exe **不会**改变该路径，数据与 exe 所在位置无关。
+
+- **分发预置配置**：若需给他人一份已有收藏/待办，请将准备好的 **`config.json`**（及同目录 **`PFN_Data`**，若有附件）放入对方机器的 **`%USERPROFILE%\PFN_Config\`**，再启动程序。
+- **`%APPDATA%\PFN\pfn_config_dir.txt`**：打包后仍可能写入，仅作记录 PFN_Config 目录之用；**不再**作为切换配置路径的依据。
 
 ---
 
@@ -152,7 +154,7 @@ python app_qt.py
 | `main.py` | 程序入口：AppUserModelID、单实例锁（`pfn_app.lock`）、应用/窗口图标与 Win32 `WM_SETICON` 补强。 |
 | `PFN_silent.pyw` | Windows 静默入口（pythonw/.pyw），避免控制台窗口闪烁。 |
 | `app_qt.py` | 主界面与业务逻辑：收藏树、右侧文件树、添加项目对话框与搜索、SAS EG 自动化、右键菜单等。 |
-| `config_manager.py` | 配置读写：收藏、匹配规则、固定路径、SAS 打开方式；`config.json` 多级回退路径。 |
+| `config_manager.py` | 配置读写：收藏、匹配规则、固定路径、SAS 打开方式；**`config.json` 固定为 `%USERPROFILE%\PFN_Config\config.json`**。 |
 | `zdrive_scanner.py` | Z 盘懒加载扫描：projects/unblinded/users，users 下 userid → projects/unblinded 的 source_id 计算。 |
 | `file_matcher.py` | 按 match_rules 匹配项目文档（aCRF、protocol、SAP、shell、顶线、setup 等）。 |
 | `workbench_launcher.py` | 工作台工具启动辅助：缓存/扫描 exe、Windows 静默启动参数等。 |
@@ -174,6 +176,18 @@ python app_qt.py
 3. **默认打开方式**：`.sas` 文件可在右键菜单设置默认打开方式（SAS EG / VS Code）；数据集文件不提供 VS Code。
 4. **多选打开**：Ctrl 多选多个 `.sas`/数据集后右键 `用 SAS EG 打开`；其中数据集会一次性传参提交到 EG。
 5. **收藏去重**：同一路径在收藏树中只显示一次；若配置中误重复，界面展示时会按 `full_path` 去重。
+6. **拖出文件**：在「项目管理」右侧文件树中选中文件或文件夹后，可拖出窗口到桌面或资源管理器完成复制/移动（多选时一并拖出）。
+7. **添加项目搜索**：产品搜索下拉会优先展示「文件夹名以关键词结尾」等更相关结果，并自动滚到列表顶部；回车或点选跳转后，树会将目标节点滚到可视区域顶部。
+
+---
+
+## 更新日志
+
+### 2026-05
+
+- **配置路径**：`config.json` 固定为 `%USERPROFILE%\PFN_Config\config.json`（按当前 Windows 用户），不再从 exe 旁或「上次目录」切换，避免升级/拷贝 exe 后误用空配置。旧数据在其它位置的需手动复制到 PFN_Config。
+- **右侧文件树 — 系统拖放**：支持将选中项拖出应用窗口至桌面、资源管理器或其它接受文件 URL 的目标；使用系统标准拖放语义（复制/移动由目标位置决定）。详见上文「### 3. 右侧文件树」中的「拖放到系统文件夹」。
+- **添加项目 — 搜索与定位**：产品搜索在排序上强化「文件夹名以关键词结尾」等优先级；刷新下拉后列表滚回顶部；从搜索跳转到树节点时使用 `PositionAtTop`，避免匹配项出现在视口最下方。详见上文「### 4. 添加项目」中的「产品搜索」。
 
 ---
 

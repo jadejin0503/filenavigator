@@ -2,6 +2,7 @@ import os
 import sys
 import json
 import re
+import shutil
 
 # 用于记录「上次使用的 config 所在目录」，exe 复制到桌面时可回退到该目录找 config
 _PFN_SAVED_CONFIG_DIR_FILE = None
@@ -18,46 +19,32 @@ def _get_saved_config_dir_path():
     return _PFN_SAVED_CONFIG_DIR_FILE
 
 
+def _get_user_profile_config_paths():
+    """返回 (PFN_Config 目录, config.json 完整路径)。优先 %USERPROFILE%，否则回退到 C:\\Users\\<登录名>。"""
+    profile = (os.environ.get("USERPROFILE") or "").strip()
+    if not profile or not os.path.isdir(profile):
+        try:
+            import getpass
+
+            username = getpass.getuser()
+        except Exception:
+            username = os.environ.get("USERNAME", "Default")
+        profile = os.path.join(r"C:\Users", username)
+    user_config_dir = os.path.join(profile, "PFN_Config")
+    user_config_path = os.path.join(user_config_dir, "config.json")
+    return user_config_dir, user_config_path
+
+
 def get_config_path():
     """
-    按优先级定位 config.json：
-    1. 程序运行目录（exe/脚本所在目录）的 config.json
-    2. 上次使用过的 config 所在目录（保存于 APPDATA\\PFN\\pfn_config_dir.txt，便于 exe 复制到桌面后仍找到原配置）
-    3. C:\\Users\\<当前用户>\\PFN_Config\\config.json（不存在则创建空配置）
+    固定使用当前 Windows 登录用户下的 PFN_Config（与用户名对应）：
+    %USERPROFILE%\\PFN_Config\\config.json
+    （在默认用户目录布局下等价于 C:\\Users\\<当前用户名>\\PFN_Config\\config.json）
+
+    不再从 exe 旁或「上次目录」抢优先级，避免版本/拷贝位置变化导致读写另一份空配置。
+    若目录或 config.json 不存在则创建；打包后仍将 config 所在目录写入 %APPDATA%\\PFN\\pfn_config_dir.txt。
     """
-    if getattr(sys, "frozen", False):
-        run_dir = os.path.dirname(os.path.abspath(sys.executable))
-    else:
-        run_dir = os.path.dirname(os.path.abspath(__file__))
-
-    # 优先级 1：运行目录
-    run_config = os.path.join(run_dir, "config.json")
-    if os.path.isfile(run_config):
-        _save_config_dir_for_fallback(run_dir)
-        return run_config
-
-    # 优先级 2：上次使用过的目录（仅打包后）
-    if getattr(sys, "frozen", False):
-        saved_path = _get_saved_config_dir_path()
-        if saved_path and os.path.isfile(saved_path):
-            try:
-                with open(saved_path, "r", encoding="utf-8") as f:
-                    saved_dir = f.read().strip()
-                if saved_dir and os.path.isdir(saved_dir):
-                    original_config = os.path.join(saved_dir, "config.json")
-                    if os.path.isfile(original_config):
-                        return original_config
-            except Exception:
-                pass
-
-    # 优先级 3：用户目录 C:\Users\<用户名>\PFN_Config\
-    try:
-        import getpass
-        username = getpass.getuser()
-    except Exception:
-        username = os.environ.get("USERNAME", "Default")
-    user_config_dir = os.path.join(r"C:\\Users", username, "PFN_Config")
-    user_config_path = os.path.join(user_config_dir, "config.json")
+    user_config_dir, user_config_path = _get_user_profile_config_paths()
     if not os.path.isdir(user_config_dir):
         try:
             os.makedirs(user_config_dir, exist_ok=True)
@@ -69,12 +56,13 @@ def get_config_path():
                 json.dump({"favorite_projects": [], "match_rules": {}}, f, ensure_ascii=False, indent=2)
         except Exception:
             pass
-    _save_config_dir_for_fallback(user_config_dir)
+    if getattr(sys, "frozen", False):
+        _save_config_dir_for_fallback(user_config_dir)
     return user_config_path
 
 
 def _save_config_dir_for_fallback(dir_path):
-    """打包后：把当前使用的 config 所在目录写入 APPDATA，供下次「exe 在别处运行」时作为优先级 2 回退。"""
+    """打包后：把当前 config 所在目录写入 APPDATA（记录 PFN_Config 等路径，供排查或其它组件参考）。"""
     if not getattr(sys, "frozen", False) or not dir_path:
         return
     saved_file = _get_saved_config_dir_path()
@@ -114,6 +102,42 @@ class ConfigManager:
             return {}
         return {str(k): bool(v) for k, v in d.items()}
 
+    def get_todo_subproject_expanded(self):
+        """「项目待办」子项目折叠状态：{ sub_key.lower(): True 展开 / False 收起 }。"""
+        st = self.data.get("ui_state")
+        if not isinstance(st, dict):
+            return {}
+        d = st.get("todo_subproject_expanded")
+        if not isinstance(d, dict):
+            return {}
+        return {str(k or "").strip().lower(): bool(v) for k, v in d.items() if str(k or "").strip()}
+
+    @staticmethod
+    def _normalize_personal_task_attachments_list(raw_list, task_id):
+        tid = str(task_id or "").strip()
+        if not tid or ".." in tid or "/" in tid or "\\" in tid:
+            return []
+        out = []
+        seen = set()
+        if not isinstance(raw_list, list):
+            return []
+        for x in raw_list:
+            s = str(x or "").strip().replace("\\", "/")
+            if not s or ".." in s or s.startswith("/"):
+                continue
+            parts = [p for p in s.split("/") if p and p != ".."]
+            if len(parts) == 1:
+                rel = f"{tid}/{parts[0]}"
+            elif len(parts) == 2 and parts[0] == tid:
+                rel = f"{tid}/{parts[1]}"
+            else:
+                continue
+            if ".." in rel or rel in seen:
+                continue
+            seen.add(rel)
+            out.append(rel)
+        return out
+
     @staticmethod
     def _normalize_personal_task_item(raw):
         if not isinstance(raw, dict):
@@ -137,6 +161,7 @@ class ConfigManager:
             due_date = ""
         if status != "已完成":
             completed_at = ""
+        attachments = ConfigManager._normalize_personal_task_attachments_list(raw.get("attachments"), tid)
         return {
             "id": tid,
             "content": content,
@@ -145,6 +170,7 @@ class ConfigManager:
             "completed_at": completed_at,
             "priority": pri,
             "due_date": due_date,
+            "attachments": attachments,
         }
 
     def get_personal_tasks(self):
@@ -163,6 +189,142 @@ class ConfigManager:
             seen.add(tid)
             out.append(item)
         return out
+
+    def personal_tasks_attachments_root(self):
+        """与 config.json 同目录下：PFN_Data/personal_task_attachments/"""
+        base = os.path.dirname(os.path.abspath(self.config_path))
+        root = os.path.join(base, "PFN_Data", "personal_task_attachments")
+        try:
+            os.makedirs(root, exist_ok=True)
+        except Exception:
+            pass
+        return root
+
+    def ensure_personal_task_attachment_dir(self, task_id):
+        tid = str(task_id or "").strip()
+        if not tid or ".." in tid or "/" in tid or "\\" in tid:
+            return ""
+        d = os.path.join(self.personal_tasks_attachments_root(), tid)
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            return ""
+        return d
+
+    def abs_path_personal_task_attachment(self, rel_path):
+        rel = str(rel_path or "").strip().replace("\\", "/")
+        if not rel or ".." in rel or rel.startswith("/"):
+            return ""
+        root = os.path.normpath(self.personal_tasks_attachments_root())
+        full = os.path.normpath(os.path.join(root, rel))
+        try:
+            if os.path.commonpath([root, full]) != root:
+                return ""
+        except ValueError:
+            return ""
+        return full
+
+    def remove_personal_task_attachments_dir(self, task_id):
+        tid = str(task_id or "").strip()
+        if not tid or ".." in tid or "/" in tid or "\\" in tid:
+            return
+        d = os.path.join(self.personal_tasks_attachments_root(), tid)
+        if os.path.isdir(d):
+            try:
+                shutil.rmtree(d, ignore_errors=True)
+            except Exception:
+                pass
+
+    @staticmethod
+    def _safe_attachment_path_segment(s, max_len=100):
+        t = str(s or "").strip().lower()
+        t = re.sub(r"[^a-z0-9_.-]+", "_", t).strip("._-")
+        if not t:
+            t = "sub"
+        return t[:max_len]
+
+    @staticmethod
+    def _normalize_project_task_attachments_list(raw_list, sub_key, task_id):
+        """项目子任务附件相对路径：{safe_sub}/{task_id}/文件名（相对于 project_task_attachments 根）。"""
+        sk = ConfigManager._safe_attachment_path_segment(sub_key)
+        tid = str(task_id or "").strip()
+        if not sk or not tid or ".." in tid or "/" in tid or "\\" in tid:
+            return []
+        out = []
+        seen = set()
+        if not isinstance(raw_list, list):
+            return []
+        for x in raw_list:
+            s = str(x or "").strip().replace("\\", "/")
+            if not s or ".." in s or s.startswith("/"):
+                continue
+            parts = [p for p in s.split("/") if p and p != ".."]
+            rel = None
+            if len(parts) == 1:
+                rel = f"{sk}/{tid}/{parts[0]}"
+            elif len(parts) == 2:
+                if parts[0] == sk:
+                    rel = f"{sk}/{tid}/{parts[1]}"
+                elif parts[0] == tid:
+                    rel = f"{sk}/{tid}/{parts[1]}"
+                else:
+                    continue
+            elif len(parts) == 3 and parts[0] == sk and parts[1] == tid:
+                rel = f"{sk}/{tid}/{parts[2]}"
+            else:
+                continue
+            if ".." in rel or rel in seen:
+                continue
+            seen.add(rel)
+            out.append(rel)
+        return out
+
+    def project_tasks_attachments_root(self):
+        """与 config.json 同目录：PFN_Data/project_task_attachments/"""
+        base = os.path.dirname(os.path.abspath(self.config_path))
+        root = os.path.join(base, "PFN_Data", "project_task_attachments")
+        try:
+            os.makedirs(root, exist_ok=True)
+        except Exception:
+            pass
+        return root
+
+    def ensure_project_task_attachment_dir(self, sub_key, task_id):
+        sk = self._safe_attachment_path_segment(sub_key)
+        tid = str(task_id or "").strip()
+        if not sk or not tid or ".." in tid or "/" in tid or "\\" in tid:
+            return ""
+        d = os.path.join(self.project_tasks_attachments_root(), sk, tid)
+        try:
+            os.makedirs(d, exist_ok=True)
+        except Exception:
+            return ""
+        return d
+
+    def abs_path_project_task_attachment(self, rel_path):
+        rel = str(rel_path or "").strip().replace("\\", "/")
+        if not rel or ".." in rel or rel.startswith("/"):
+            return ""
+        root = os.path.normpath(self.project_tasks_attachments_root())
+        full = os.path.normpath(os.path.join(root, rel))
+        try:
+            if os.path.commonpath([root, full]) != root:
+                return ""
+        except ValueError:
+            return ""
+        return full
+
+    def remove_project_task_attachments_dir(self, sub_key, task_id):
+        sk = self._safe_attachment_path_segment(sub_key)
+        tid = str(task_id or "").strip()
+        if not sk or not tid:
+            return
+        d = os.path.join(self.project_tasks_attachments_root(), sk, tid)
+        if os.path.isdir(d):
+            try:
+                shutil.rmtree(d, ignore_errors=True)
+            except Exception:
+                pass
 
     def add_personal_task(self, task):
         item = self._normalize_personal_task_item(task)
@@ -187,7 +349,7 @@ class ConfigManager:
             if str(t.get("id", "")) != tid:
                 continue
             merged = dict(t)
-            for k in ("content", "priority", "status", "completed_at", "due_date"):
+            for k in ("content", "priority", "status", "completed_at", "due_date", "attachments"):
                 if k in patch:
                     merged[k] = patch.get(k)
             item = self._normalize_personal_task_item(merged)
@@ -212,6 +374,10 @@ class ConfigManager:
             return False
         self.data["personal_tasks"] = new_tasks
         self.save()
+        try:
+            self.remove_personal_task_attachments_dir(tid)
+        except Exception:
+            pass
         return True
 
     def get_personal_due_alert_date(self):
@@ -243,6 +409,89 @@ class ConfigManager:
         clean = {str(k): bool(v) for k, v in (expanded_map or {}).items() if str(k).strip()}
         self.data["ui_state"]["todo_product_expanded"] = clean
         self.save()
+
+    def save_todo_subproject_expanded_snapshot(self, expanded_map):
+        """写入子项目折叠状态（收起/展开后或关闭窗口时调用）。"""
+        if "ui_state" not in self.data or not isinstance(self.data.get("ui_state"), dict):
+            self.data["ui_state"] = {}
+        clean = {
+            str(k or "").strip().lower(): bool(v)
+            for k, v in (expanded_map or {}).items()
+            if str(k or "").strip()
+        }
+        self.data["ui_state"]["todo_subproject_expanded"] = clean
+        self.save()
+
+    @staticmethod
+    def _todo_hidden_list_to_set(raw) -> set:
+        if not isinstance(raw, list):
+            return set()
+        out = set()
+        for x in raw:
+            s = str(x or "").strip().lower()
+            if s:
+                out.add(s)
+        return out
+
+    def get_todo_hidden_products(self) -> set:
+        """待办列表已隐藏的产品名（小写）。"""
+        st = self.data.get("ui_state")
+        if not isinstance(st, dict):
+            return set()
+        return self._todo_hidden_list_to_set(st.get("todo_hidden_products"))
+
+    def get_todo_hidden_subprojects(self) -> set:
+        """待办列表已隐藏的子项目 sub_key（小写）。"""
+        st = self.data.get("ui_state")
+        if not isinstance(st, dict):
+            return set()
+        return self._todo_hidden_list_to_set(st.get("todo_hidden_subprojects"))
+
+    def hide_todo_product(self, product_name) -> bool:
+        """仅从项目待办隐藏产品卡片；不删除 project_management 数据。"""
+        try:
+            key = str(product_name or "").strip().lower()
+            if not key:
+                return False
+            if "ui_state" not in self.data or not isinstance(self.data.get("ui_state"), dict):
+                self.data["ui_state"] = {}
+            lst = self.data["ui_state"].get("todo_hidden_products")
+            if not isinstance(lst, list):
+                lst = []
+            if key not in {str(x or "").strip().lower() for x in lst}:
+                lst.append(key)
+            self.data["ui_state"]["todo_hidden_products"] = lst
+            self.save()
+            return True
+        except Exception as e:
+            try:
+                print(f"[PFN config] hide_todo_product 失败: {e}", flush=True)
+            except Exception:
+                pass
+            return False
+
+    def hide_todo_subproject(self, sub_key) -> bool:
+        """仅从项目待办隐藏子项目；不删除 project_management 数据。"""
+        try:
+            key = str(sub_key or "").strip().lower()
+            if not key:
+                return False
+            if "ui_state" not in self.data or not isinstance(self.data.get("ui_state"), dict):
+                self.data["ui_state"] = {}
+            lst = self.data["ui_state"].get("todo_hidden_subprojects")
+            if not isinstance(lst, list):
+                lst = []
+            if key not in {str(x or "").strip().lower() for x in lst}:
+                lst.append(key)
+            self.data["ui_state"]["todo_hidden_subprojects"] = lst
+            self.save()
+            return True
+        except Exception as e:
+            try:
+                print(f"[PFN config] hide_todo_subproject 失败: {e}", flush=True)
+            except Exception:
+                pass
+            return False
 
     def get_todo_filters(self):
         """返回待办筛选状态：{'project': 0-2, 'personal': 0-2}。"""
@@ -611,6 +860,49 @@ class ConfigManager:
                 pass
             return False
 
+    def remove_subproject(self, sub_key):
+        """从 project_management 移除子项目（任务、时间节点）；清理附件；不删除收藏树。"""
+        try:
+            sub_key = str(sub_key or "").strip().lower()
+            if not sub_key:
+                return False
+            pm = self.get_project_management()
+            subs = pm.get("subprojects", {})
+            if not isinstance(subs, dict):
+                return False
+            if sub_key not in subs:
+                return False
+            info = subs.pop(sub_key)
+            tasks = info.get("tasks", []) if isinstance(info, dict) else []
+            if isinstance(tasks, list):
+                for t in tasks:
+                    if not isinstance(t, dict):
+                        continue
+                    tid = str(t.get("id", "") or "").strip()
+                    if tid:
+                        self.remove_project_task_attachments_dir(sub_key, tid)
+            sk_safe = self._safe_attachment_path_segment(sub_key)
+            if sk_safe:
+                sub_dir = os.path.join(self.project_tasks_attachments_root(), sk_safe)
+                if os.path.isdir(sub_dir):
+                    try:
+                        shutil.rmtree(sub_dir, ignore_errors=True)
+                    except Exception:
+                        pass
+            self.data["project_management"] = pm
+            pt = self.data.get("project_tasks")
+            if isinstance(pt, dict):
+                pt.pop(sub_key, None)
+            self._sync_project_tasks_from_subprojects()
+            self.save()
+            return True
+        except Exception as e:
+            try:
+                print(f"[PFN config] remove_subproject 失败: {e}", flush=True)
+            except Exception:
+                pass
+            return False
+
     def add_favorite(self, project, overwrite=False):
         existing = {p["id"] for p in self.data["favorite_projects"]}
         if overwrite and project["id"] in existing:
@@ -627,13 +919,18 @@ class ConfigManager:
 
     def save(self):
         try:
+            parent = os.path.dirname(os.path.abspath(self.config_path))
+            if parent and not os.path.isdir(parent):
+                os.makedirs(parent, exist_ok=True)
             with open(self.config_path, "w", encoding="utf-8") as f:
                 json.dump(self.data, f, ensure_ascii=False, indent=2)
+            return True
         except Exception as e:
             try:
                 print(f"[PFN config] 保存 config 失败: {e}", flush=True)
             except Exception:
                 pass
+            return False
 
     def reload_config(self):
         """从磁盘重新读取 config.json，使内存中的 project_management 等与文件一致（不写回磁盘）。"""
@@ -805,12 +1102,22 @@ class ConfigManager:
             us = self.data["ui_state"]
             if "todo_product_expanded" in us and not isinstance(us.get("todo_product_expanded"), dict):
                 us["todo_product_expanded"] = {}
+            if "todo_subproject_expanded" in us and not isinstance(us.get("todo_subproject_expanded"), dict):
+                us["todo_subproject_expanded"] = {}
+            if "todo_hidden_products" in us and not isinstance(us.get("todo_hidden_products"), list):
+                us["todo_hidden_products"] = []
+            if "todo_hidden_subprojects" in us and not isinstance(us.get("todo_hidden_subprojects"), list):
+                us["todo_hidden_subprojects"] = []
             if "todo_filters" in us and not isinstance(us.get("todo_filters"), dict):
                 us["todo_filters"] = {"project": 0, "personal": 0}
             if "personal_todo" in us and not isinstance(us.get("personal_todo"), dict):
                 us["personal_todo"] = {}
         if "todo_filters" not in self.data["ui_state"] or not isinstance(self.data["ui_state"].get("todo_filters"), dict):
             self.data["ui_state"]["todo_filters"] = {"project": 0, "personal": 0}
+        if "todo_hidden_products" not in self.data["ui_state"]:
+            self.data["ui_state"]["todo_hidden_products"] = []
+        if "todo_hidden_subprojects" not in self.data["ui_state"]:
+            self.data["ui_state"]["todo_hidden_subprojects"] = []
         for _k in ("project", "personal"):
             try:
                 _v = int(self.data["ui_state"]["todo_filters"].get(_k, 0))

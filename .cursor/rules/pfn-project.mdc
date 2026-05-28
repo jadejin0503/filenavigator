@@ -97,12 +97,11 @@ alwaysApply: true
 
 ### 3. 配置管理（解决分发/适配痛点）
 #### 3.1 配置加载规则（强制）
-- ✅ `config.json` 查找优先级（按顺序）：
-  1. 程序运行目录 → 2. 上次使用过的 config 所在目录（`%APPDATA%\PFN\pfn_config_dir.txt` 记录）→ 3. `C:\Users\<当前用户>\PFN_Config\config.json`（不存在则创建空配置）
+- ✅ `config.json` **固定**路径：`%USERPROFILE%\PFN_Config\config.json`（一般为 `C:\Users\<当前登录名>\PFN_Config\config.json`）；**不再**从 exe 旁或 `%APPDATA%\PFN\pfn_config_dir.txt` 抢优先级。目录或文件不存在时由程序创建；打包后仍可将该目录写入 `pfn_config_dir.txt` 供参考。
 - ✅ 配置加载失败时，自动生成「干净的默认配置」，并提示用户：`"配置文件丢失，已生成默认配置，请重新设置路径"`；
 - ✅ 配置项校验：加载配置后必须校验关键项（如SAS EG路径、Z盘根目录），缺失项标记为未配置并引导用户补充；
 - ✅ 配置备份：修改配置时自动备份旧配置为 `config.backup.json`，保留最近3个版本。
- - ✅ **分发给新用户**：若仅分发 `PFN.exe`（不附带 `config.json`），对方首次运行会在其机器的 `C:\Users\<对方用户名>\PFN_Config\config.json` 生成并保存收藏；若随 exe 一并分发 `config.json`，则对方会直接使用该配置（等同“带走你的收藏”）。
+ - ✅ **分发给新用户**：仅分发 `PFN.exe` 时，对方首次运行会在其 `%USERPROFILE%\PFN_Config\config.json` 生成配置；若需「预置收藏」，应向对方提供一份需手动放入该路径的 `config.json`（及同目录下 `PFN_Data` 若有个人待办附件），**不再**依赖「与 exe 同目录的 config.json」自动加载。
 
 #### 3.2 打包规范（解决分发问题）
 - ✅ **唯一入口**：Windows 发布构建使用仓库根目录 **`build.bat`**（内部调用 `pyinstaller build.spec`），产出 **`PFN_app\PFN.exe`** 单文件；不得再引入独立 onedir spec 或绕过 `main.py` 作为 Analysis 入口。
