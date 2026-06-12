@@ -22,7 +22,9 @@ if __name__ == "__main__" and sys.platform == "win32":
     except Exception:
         pass
 import re
+import calendar
 from functools import partial
+from typing import Optional
 from PyQt6.QtWidgets import (
     QApplication, QMainWindow, QWidget, QSplitter, QListWidget, QListWidgetItem,
     QTreeWidget, QTreeWidgetItem, QMenu, QLabel, QVBoxLayout, QHBoxLayout,
@@ -30,7 +32,7 @@ from PyQt6.QtWidgets import (
     QStyledItemDelegate, QGraphicsDropShadowEffect, QAbstractItemView,
     QRadioButton, QCheckBox, QButtonGroup, QLineEdit, QInputDialog, QTextEdit, QDateEdit, QToolTip,
     QTabWidget, QScrollArea, QComboBox, QDialogButtonBox, QStackedWidget, QGridLayout,
-    QStyleOptionViewItem,
+    QStyleOptionViewItem, QProgressDialog, QCalendarWidget,
 )
 from PyQt6.QtCore import (
     Qt,
@@ -41,6 +43,8 @@ from PyQt6.QtCore import (
     QSignalBlocker,
     QDate,
     QPoint,
+    QModelIndex,
+    QRect,
     QUrl,
     QMimeData,
     QRectF,
@@ -48,8 +52,22 @@ from PyQt6.QtCore import (
     QRunnable,
     QThreadPool,
 )
-from PyQt6.QtGui import QGuiApplication, QColor, QFont, QPen, QPainter, QIcon, QCursor, QPixmap
-from PyQt6.QtCore import QPropertyAnimation
+from PyQt6.QtGui import (
+    QGuiApplication,
+    QColor,
+    QFont,
+    QPen,
+    QPainter,
+    QPalette,
+    QIcon,
+    QCursor,
+    QPixmap,
+    QDesktopServices,
+    QDrag,
+    QImage,
+    QImageReader,
+)
+from PyQt6.QtCore import QPropertyAnimation, QEasingCurve
 import html
 import shutil
 import struct
@@ -60,7 +78,7 @@ import threading
 import webbrowser
 import tempfile
 import math
-from datetime import datetime
+from datetime import datetime, timedelta
 import uuid
 from copy import deepcopy
 from config_manager import ConfigManager
@@ -235,6 +253,73 @@ def _parse_milestone_editor_text(text: str):
 def _milestones_to_editor_text(milestones) -> str:
     rows = _pfn_normalize_milestones(milestones)
     return "\n".join(f"{m['name']}: {m['date']}" for m in rows)
+
+
+_CN_MONTH_TOKENS = (
+    ("十二", 12), ("十一", 11), ("十", 10), ("九", 9), ("八", 8), ("七", 7),
+    ("六", 6), ("五", 5), ("四", 4), ("三", 3), ("二", 2), ("一", 1),
+)
+_WEEKDAY_CN = ("周一", "周二", "周三", "周四", "周五", "周六", "周日")
+
+
+def _parse_chinese_month_token(date_str: str) -> Optional[int]:
+    """从「四月底」「6月」等文本推断月份 1-12，无法推断则返回 None。"""
+    s = str(date_str or "").strip()
+    if not s or "月" not in s:
+        return None
+    for token, month in _CN_MONTH_TOKENS:
+        if token in s:
+            return month
+    m = re.search(r"(\d{1,2})\s*月", s)
+    if m:
+        try:
+            v = int(m.group(1))
+            if 1 <= v <= 12:
+                return v
+        except Exception:
+            pass
+    return None
+
+
+def _classify_milestone_date(date_str: str, year: int, month: int):
+    """
+    将里程碑日期归类到月视图。
+    返回 (kind, day)：kind 为 exact_day | fuzzy_in_month | out_of_month | unparseable；day 仅 exact_day 时有值。
+    """
+    s = str(date_str or "").strip()
+    if not s:
+        return "unparseable", None
+    try:
+        year = int(year)
+        month = int(month)
+    except Exception:
+        return "unparseable", None
+    if month < 1 or month > 12:
+        return "unparseable", None
+
+    m = re.fullmatch(r"(\d{4})-(\d{1,2})-(\d{1,2})", s)
+    if m:
+        y, mo, d = int(m.group(1)), int(m.group(2)), int(m.group(3))
+        if y == year and mo == month:
+            last = calendar.monthrange(year, month)[1]
+            if 1 <= d <= last:
+                return "exact_day", d
+        return "out_of_month", None
+
+    m = re.fullmatch(r"(\d{4})-(\d{1,2})", s)
+    if m:
+        y, mo = int(m.group(1)), int(m.group(2))
+        if y == year and mo == month:
+            return "fuzzy_in_month", None
+        return "out_of_month", None
+
+    inferred = _parse_chinese_month_token(s)
+    if inferred is not None:
+        if inferred == month:
+            return "fuzzy_in_month", None
+        return "out_of_month", None
+
+    return "unparseable", None
 
 
 def _source_root_name(dir_type):
@@ -519,6 +604,347 @@ _RIGHT_TREE_STYLE = (
     "QTreeWidget::item:selected{background:#E8F3FF; color:#165DFF;} "
 )
 
+# 右键 / QMenu：与右侧树 hover 同色板，悬停与选中对比更明显（优于系统默认浅灰）
+_CONTEXT_MENU_QSS = (
+    "QMenu{"
+    "background-color:#FFFFFF;"
+    "border:1px solid #E5E6EB;"
+    "border-radius:6px;"
+    "padding:2px;"
+    "}"
+    "QMenu::item{"
+    "padding:3px 14px 3px 10px;"
+    "border-radius:4px;"
+    "color:#1F2329;"
+    "background-color:transparent;"
+    "}"
+    "QMenu::item:disabled{color:#C9CDD4;background-color:transparent;}"
+    "QMenu::item:selected{"
+    "background-color:#D1E5FF;"
+    "color:#165DFF;"
+    "}"
+    "QMenu::item:hover{"
+    "background-color:#D1E5FF;"
+    "color:#165DFF;"
+    "}"
+    "QMenu::separator{height:1px;margin:3px 8px;background:#E5E6EB;}"
+)
+
+# QDateEdit calendarPopup：显式前景/背景，避免对话框 QSS 下年份与日期发白
+_CALENDAR_POPUP_QSS = (
+    "QCalendarWidget{background-color:#FFFFFF;color:#1F2329;border:1px solid #E5E6EB;border-radius:8px;}"
+    "QCalendarWidget QWidget#qt_calendar_navigationbar{"
+    "background-color:#F7F8FA;color:#1F2329;border-top-left-radius:8px;border-top-right-radius:8px;}"
+    "QCalendarWidget QToolButton{"
+    "color:#1F2329;background-color:transparent;border:none;border-radius:4px;min-width:28px;min-height:28px;}"
+    "QCalendarWidget QToolButton:hover{background-color:#D1E5FF;color:#165DFF;}"
+    "QCalendarWidget QSpinBox{"
+    "color:#1F2329;background-color:#FFFFFF;border:1px solid #DCDEE3;border-radius:4px;padding:0 4px;}"
+    "QCalendarWidget QAbstractItemView{"
+    "color:#1F2329;background-color:#FFFFFF;outline:none;border:none;selection-background-color:transparent;}"
+    "QCalendarWidget QAbstractItemView:disabled{color:#C9CDD4;background-color:#FFFFFF;}"
+)
+
+
+def _calendar_widget_for_view(view) -> Optional[QCalendarWidget]:
+    w = view
+    while w is not None:
+        if isinstance(w, QCalendarWidget):
+            return w
+        try:
+            w = w.parent()
+        except Exception:
+            break
+    return None
+
+
+def _calendar_cell_date(calendar: Optional[QCalendarWidget], day_text: str, enabled: bool) -> Optional[QDate]:
+    if not calendar or not enabled:
+        return None
+    try:
+        day = int(day_text)
+        qd = QDate(calendar.yearShown(), calendar.monthShown(), day)
+        return qd if qd.isValid() else None
+    except (TypeError, ValueError):
+        return None
+
+
+class _CalendarViewportHoverFilter(QObject):
+    """追踪鼠标所在日期格，供 delegate 绘制单日悬停态。"""
+
+    def __init__(self, view: QAbstractItemView):
+        super().__init__(view)
+        self._view = view
+        self._hover = QModelIndex()
+
+    def _point(self, event):
+        try:
+            return event.position().toPoint()
+        except AttributeError:
+            return event.pos()
+
+    def eventFilter(self, watched, event):
+        if watched is not self._view.viewport():
+            return False
+        et = event.type()
+        if et == QEvent.Type.MouseMove:
+            idx = self._view.indexAt(self._point(event))
+            if idx != self._hover:
+                prev = self._hover
+                self._hover = idx
+                self._view._pfn_hover_index = idx
+                try:
+                    if prev.isValid() or idx.isValid():
+                        self._view.viewport().update()
+                except Exception:
+                    pass
+        elif et in (QEvent.Type.Leave, QEvent.Type.Hide):
+            prev = self._hover
+            self._hover = QModelIndex()
+            self._view._pfn_hover_index = QModelIndex()
+            if prev.isValid():
+                try:
+                    self._view.viewport().update()
+                except Exception:
+                    pass
+        return False
+
+
+class _CalendarDayDelegate(QStyledItemDelegate):
+    """日历单日格绘制：悬停/选中/今日仅作用于当前格。"""
+
+    _CLR_TEXT_OFF = QColor("#C9CDD4")
+    _CLR_TODAY_RING = QColor("#165DFF")
+    _CLR_TODAY_BG = QColor("#F3F8FF")
+    _CLR_HOVER_BG = QColor("#B8D4FF")
+    _CLR_HOVER_BORDER = QColor("#165DFF")
+    _CLR_HOVER_TEXT = QColor("#0E42D2")
+    _CLR_HOVER_SHADOW = QColor(22, 93, 255, 55)
+    _CLR_SEL_BG = QColor("#165DFF")
+    _CLR_SEL_TEXT = QColor("#FFFFFF")
+    _CLR_SEL_HOVER_BG = QColor("#4080FF")
+
+    def __init__(self, view, calendar: Optional[QCalendarWidget] = None):
+        super().__init__(view)
+        self._calendar = calendar or _calendar_widget_for_view(view)
+
+    def _cell_rect(self, option) -> QRect:
+        side = min(option.rect.width(), option.rect.height()) - 4
+        side = max(22, min(side, 32))
+        cx = option.rect.center().x()
+        cy = option.rect.center().y()
+        return QRect(int(cx - side / 2), int(cy - side / 2), side, side)
+
+    def _is_hovered(self, view, index) -> bool:
+        hover_idx = getattr(view, "_pfn_hover_index", QModelIndex())
+        if isinstance(hover_idx, QModelIndex) and hover_idx.isValid() and hover_idx == index:
+            return True
+        return False
+
+    def paint(self, painter, option, index):
+        painter.save()
+        painter.setRenderHint(QPainter.RenderHint.Antialiasing, True)
+        opt = QStyleOptionViewItem(option)
+        self.initStyleOption(opt, index)
+        text = str(opt.text or "").strip()
+        if not text:
+            painter.restore()
+            return
+        view = option.widget or self.parent()
+        enabled = bool(opt.state & QStyle.StateFlag.State_Enabled)
+        selected = bool(opt.state & QStyle.StateFlag.State_Selected)
+        hover = self._is_hovered(view, index)
+        cell_qt = self._cell_rect(option)
+        cell_date = _calendar_cell_date(self._calendar, text, enabled)
+        is_today = bool(cell_date and cell_date == QDate.currentDate())
+        painter.setFont(_pfn_font_for_delegate_paint(opt.font))
+
+        if enabled and selected and hover:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(self._CLR_SEL_HOVER_BG)
+            painter.drawRoundedRect(cell_qt, 6, 6)
+            painter.setPen(self._CLR_SEL_TEXT)
+        elif enabled and selected:
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(self._CLR_SEL_BG)
+            painter.drawRoundedRect(cell_qt, 6, 6)
+            painter.setPen(self._CLR_SEL_TEXT)
+        elif enabled and hover:
+            shadow = cell_qt.adjusted(0, 1, 0, 2)
+            painter.setPen(Qt.PenStyle.NoPen)
+            painter.setBrush(self._CLR_HOVER_SHADOW)
+            painter.drawRoundedRect(shadow, 6, 6)
+            painter.setBrush(self._CLR_HOVER_BG)
+            painter.setPen(QPen(self._CLR_HOVER_BORDER, 1.5))
+            painter.drawRoundedRect(cell_qt, 6, 6)
+            painter.setPen(self._CLR_HOVER_TEXT)
+        elif enabled and is_today:
+            painter.setBrush(self._CLR_TODAY_BG)
+            painter.setPen(QPen(self._CLR_TODAY_RING, 1))
+            painter.drawRoundedRect(cell_qt, 6, 6)
+            painter.setPen(opt.palette.color(QPalette.ColorRole.Text))
+        elif enabled:
+            painter.setPen(opt.palette.color(QPalette.ColorRole.Text))
+        else:
+            painter.setPen(self._CLR_TEXT_OFF)
+        painter.drawText(option.rect, int(Qt.AlignmentFlag.AlignCenter), text)
+        painter.restore()
+
+
+def _safe_apply_calendar_delegate_for_edit(de: QDateEdit) -> None:
+    """QTimer 回调：QDateEdit 已 deleteLater 时避免访问 C++ 对象导致 segfault。"""
+    if getattr(de, "_pfn_cal_delegate_disabled", False):
+        return
+    try:
+        from PyQt6 import sip
+
+        if sip.isdeleted(de):
+            return
+    except Exception:
+        pass
+    try:
+        _apply_calendar_day_delegate(de.calendarWidget())
+    except RuntimeError:
+        pass
+
+
+def _schedule_calendar_delegate_apply(de: QDateEdit) -> None:
+    hook = getattr(de, "_pfn_cal_delegate_hook", None)
+    if hook is not None and hasattr(hook, "_request_apply"):
+        hook._request_apply()
+        return
+    _safe_apply_calendar_delegate_for_edit(de)
+
+
+class _PFNDateEditCalendarDelegateHook(QObject):
+    """QDateEdit 日历 lazy 创建时挂载单日格 delegate。"""
+
+    def __init__(self, de: QDateEdit):
+        super().__init__(de)
+        self._de = de
+        self._timer = QTimer(self)
+        self._timer.setSingleShot(True)
+        self._timer.timeout.connect(lambda: _safe_apply_calendar_delegate_for_edit(self._de))
+
+    def _request_apply(self) -> None:
+        self._timer.start(0)
+
+    def eventFilter(self, obj, event):
+        if obj is self._de and event.type() in (
+            QEvent.Type.MouseButtonPress,
+            QEvent.Type.Show,
+            QEvent.Type.FocusIn,
+        ):
+            self._request_apply()
+        return False
+
+
+def _teardown_pfn_date_edit(de: QDateEdit) -> None:
+    """移除 QDateEdit 日历 delegate / eventFilter，避免 deleteLater 后事件循环 segfault。"""
+    de._pfn_cal_delegate_disabled = True
+    hook = getattr(de, "_pfn_cal_delegate_hook", None)
+    if hook is not None:
+        try:
+            if hasattr(hook, "_timer"):
+                hook._timer.stop()
+        except Exception:
+            pass
+        try:
+            de.removeEventFilter(hook)
+        except Exception:
+            pass
+        de._pfn_cal_delegate_hook = None
+    try:
+        from PyQt6 import sip
+
+        if sip.isdeleted(de):
+            return
+    except Exception:
+        pass
+    try:
+        cal = de.calendarWidget()
+    except RuntimeError:
+        return
+    if cal is None:
+        return
+    for view in cal.findChildren(QAbstractItemView):
+        flt = getattr(view, "_pfn_hover_filter", None)
+        if flt is not None:
+            try:
+                view.viewport().removeEventFilter(flt)
+            except Exception:
+                pass
+            view._pfn_hover_filter = None
+        if isinstance(view.itemDelegate(), _CalendarDayDelegate):
+            view.setItemDelegate(QStyledItemDelegate(view))
+
+
+def _install_calendar_hover_filter(view: QAbstractItemView) -> None:
+    if getattr(view, "_pfn_hover_filter", None) is not None:
+        return
+    view._pfn_hover_index = QModelIndex()
+    flt = _CalendarViewportHoverFilter(view)
+    view._pfn_hover_filter = flt
+    view.viewport().installEventFilter(flt)
+
+
+def _apply_calendar_day_delegate(cal) -> None:
+    if cal is None:
+        return
+    try:
+        cal.setGridVisible(True)
+        cal.setVerticalHeaderFormat(QCalendarWidget.VerticalHeaderFormat.NoVerticalHeader)
+        cal.setHorizontalHeaderFormat(QCalendarWidget.HorizontalHeaderFormat.ShortDayNames)
+    except Exception:
+        pass
+    for view in cal.findChildren(QAbstractItemView):
+        view.setMouseTracking(True)
+        try:
+            vp = view.viewport()
+            vp.setMouseTracking(True)
+            vp.setAttribute(Qt.WidgetAttribute.WA_Hover, True)
+        except Exception:
+            pass
+        if not isinstance(view.itemDelegate(), _CalendarDayDelegate):
+            view.setItemDelegate(_CalendarDayDelegate(view, cal))
+        _install_calendar_hover_filter(view)
+    cal._pfn_day_delegate_applied = True
+
+
+def _apply_calendar_day_delegate_from_edit(de: QDateEdit) -> None:
+    cal = de.calendarWidget()
+    if cal is not None:
+        _apply_calendar_day_delegate(cal)
+
+
+def _ensure_calendar_day_delegate(de: QDateEdit) -> None:
+    if getattr(de, "_pfn_cal_delegate_hook", None) is not None:
+        return
+    hook = _PFNDateEditCalendarDelegateHook(de)
+    de.installEventFilter(hook)
+    de._pfn_cal_delegate_hook = hook
+
+
+def _style_pfn_date_edit(de: QDateEdit, *, border: bool = True, install_delegate: bool = True) -> None:
+    """为 QDateEdit 及其 calendarPopup 应用统一 QSS。install_delegate=False 用于轻量弹窗，避免 delegate 链 segfault。"""
+    base = (
+        "QDateEdit{border:1px solid #DCDEE3;border-radius:6px;padding:0 8px;color:#1F2329;}"
+        if border
+        else ""
+    )
+    de.setStyleSheet(base + _CALENDAR_POPUP_QSS)
+    if install_delegate:
+        _ensure_calendar_day_delegate(de)
+
+
+def _style_pfn_context_menu(menu: QMenu) -> None:
+    """为右键菜单及所有子菜单应用统一 QSS（递归）。"""
+    menu.setStyleSheet(_CONTEXT_MENU_QSS)
+    for act in menu.actions():
+        sub = act.menu()
+        if sub is not None:
+            _style_pfn_context_menu(sub)
+
 
 def _pfn_font_for_delegate_paint(f: QFont) -> QFont:
     """样式表 font-size 为 px 时 QFont 常为 pointSize=-1，Qt 在 QStyledItemDelegate 内会触发 setPointSize(-1) 警告。
@@ -547,6 +973,111 @@ def _pfn_qfont_pt(point_size: int, bold: bool = False) -> QFont:
     return f
 
 
+class _MsNodeChipFrame(QFrame):
+    """关键时间节点 chip：双击/右键编辑或删除，左侧蓝色强调条。"""
+
+    def __init__(self, product, sub_name, ms_name, ms_date, sub_key, on_edit=None, on_delete=None, parent=None):
+        super().__init__(parent)
+        self._sk = str(sub_key or "").strip().lower()
+        self._sn = str(sub_name or "").strip()
+        self._ms_name = str(ms_name or "").strip()
+        self._on_edit = on_edit
+        self._on_delete = on_delete
+        self.setObjectName("msNodeChip")
+        self.setStyleSheet(
+            "QFrame#msNodeChip{"
+            "background:#FFFFFF; border:1px solid #E5E6EB; border-left:3px solid #165DFF;"
+            "border-radius:8px;"
+            "}"
+            "QFrame#msNodeChip:hover{background:#F7FAFF; border-color:#BEDAFF;}"
+        )
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        self.customContextMenuRequested.connect(self._on_context)
+        outer = QHBoxLayout(self)
+        outer.setContentsMargins(10, 6, 10, 6)
+        outer.setSpacing(0)
+        v = QVBoxLayout()
+        v.setContentsMargins(0, 0, 0, 0)
+        v.setSpacing(2)
+        prod = str(product or "").strip() or "（未命名产品）"
+        sub = str(sub_name or "").strip() or "（未命名项目）"
+        proj_lbl = QLabel(f"{prod} / {sub}")
+        proj_lbl.setFont(_pfn_qfont_pt(9, True))
+        proj_lbl.setStyleSheet("color:#1F2329; background:transparent; border:none;")
+        proj_lbl.setWordWrap(True)
+        proj_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        ms_lbl = QLabel(f"{str(ms_name or '').strip()}：{str(ms_date or '').strip()}")
+        ms_lbl.setFont(_pfn_qfont_pt(9))
+        ms_lbl.setStyleSheet("color:#165DFF; background:transparent; border:none;")
+        ms_lbl.setWordWrap(True)
+        ms_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+        v.addWidget(proj_lbl)
+        v.addWidget(ms_lbl)
+        outer.addLayout(v, 1)
+        for w in self.findChildren(QWidget):
+            if w is not self:
+                w.installEventFilter(self)
+
+    def enterEvent(self, event):
+        win = self.window()
+        if win is not None and hasattr(win, "statusBar"):
+            try:
+                win.statusBar().showMessage("双击编辑 · 右键菜单", 2000)
+            except Exception:
+                pass
+        super().enterEvent(event)
+
+    def eventFilter(self, obj, event):
+        if (
+            event.type() == QEvent.Type.MouseButtonDblClick
+            and event.button() == Qt.MouseButton.LeftButton
+            and (obj is self or self.isAncestorOf(obj))
+        ):
+            self._trigger_edit()
+            return True
+        return super().eventFilter(obj, event)
+
+    def event(self, e):
+        if e.type() == QEvent.Type.MouseButtonDblClick and e.button() == Qt.MouseButton.LeftButton:
+            self._trigger_edit()
+            e.accept()
+            return True
+        return super().event(e)
+
+    def _trigger_edit(self):
+        if callable(self._on_edit) and self._sk:
+            sk, sn, cb = self._sk, self._sn, self._on_edit
+            QTimer.singleShot(0, lambda: cb(sk, sn))
+
+    def _on_context(self, pos):
+        menu = QMenu(self)
+        act_edit = menu.addAction("编辑时间节点…")
+        act_del = None
+        if callable(self._on_delete) and self._sk and self._ms_name:
+            act_del = menu.addAction("删除节点")
+        _style_pfn_context_menu(menu)
+        act = menu.exec(self.mapToGlobal(pos))
+        if act == act_edit:
+            sk, sn = self._sk, self._sn
+            cb = self._on_edit
+            QTimer.singleShot(0, lambda: cb(sk, sn) if callable(cb) and sk else None)
+        elif act_del and act == act_del:
+            sk, sn, mn, cb = self._sk, self._sn, self._ms_name, self._on_delete
+            QTimer.singleShot(0, lambda: cb(sk, mn, sn) if callable(cb) and sk and mn else None)
+
+    def mouseDoubleClickEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton:
+            self._trigger_edit()
+            event.accept()
+            return
+        super().mouseDoubleClickEvent(event)
+
+
+def _ms_node_chip(product, sub_name, ms_name, ms_date, sub_key, on_edit=None, on_delete=None, parent=None):
+    return _MsNodeChipFrame(product, sub_name, ms_name, ms_date, sub_key, on_edit, on_delete, parent)
+
+
 class _TimeColumnDelegate(QStyledItemDelegate):
     """右侧文件树第 2 列：时间右对齐、浅灰 11px、右侧 padding"""
     def initStyleOption(self, option, index):
@@ -572,6 +1103,46 @@ class _TimeColumnDelegate(QStyledItemDelegate):
         flags = Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter
         painter.drawText(rect, int(flags), text)
         painter.restore()
+
+
+class _FileBrowserTreeWidget(QTreeWidget):
+    """右侧目录树：将选中项拖到资源管理器、桌面等，由系统处理复制/移动。"""
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setDragEnabled(True)
+        self.setDragDropMode(QAbstractItemView.DragDropMode.DragOnly)
+
+    def startDrag(self, supportedActions):
+        paths = []
+        seen = set()
+        for it in self.selectedItems():
+            p = it.data(0, Qt.ItemDataRole.UserRole)
+            if not p or not isinstance(p, str):
+                continue
+            np = os.path.normpath(p)
+            if np in seen:
+                continue
+            if os.path.isfile(np) or os.path.isdir(np):
+                seen.add(np)
+                paths.append(np)
+        if not paths:
+            return
+        md = QMimeData()
+        md.setUrls([QUrl.fromLocalFile(p) for p in paths])
+        drag = QDrag(self)
+        drag.setMimeData(md)
+        try:
+            if len(paths) == 1:
+                ic = icon_for_file_soft(paths[0], 32)
+                pm = ic.pixmap(32, 32)
+                if pm is not None and not pm.isNull():
+                    drag.setPixmap(pm)
+        except Exception:
+            pass
+        drag.exec(
+            Qt.DropAction.CopyAction | Qt.DropAction.MoveAction | Qt.DropAction.LinkAction
+        )
 
 
 class _FavTreeDelegate(QStyledItemDelegate):
@@ -654,6 +1225,51 @@ class FavTreeWidgetItem(QTreeWidgetItem):
         self._pfn_level = max(0, int(level))
 
 
+class _TodoSubprojectHeadRow(QWidget):
+    """子项目标题行：左键折叠/展开。不用 QPushButton 内嵌 QLabel（Windows 下易渲染成空白灰条）。"""
+
+    def __init__(self, parent=None, on_toggle=None, status_hint: str = ""):
+        super().__init__(parent)
+        self._on_toggle = on_toggle
+        self._status_hint = str(status_hint or "").strip()
+        self.setObjectName("todoSubprojectHead")
+        self.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.setStyleSheet(
+            "QWidget#todoSubprojectHead{background:transparent;border-radius:8px;}"
+            "QWidget#todoSubprojectHead:hover{background:rgba(22,93,255,0.06);}"
+        )
+        self._head_layout = QHBoxLayout(self)
+        self._head_layout.setContentsMargins(6, 4, 6, 4)
+        self._head_layout.setSpacing(10)
+
+    def enterEvent(self, event):
+        if self._status_hint:
+            win = self.window()
+            if win is not None and hasattr(win, "statusBar"):
+                try:
+                    win.statusBar().showMessage(self._status_hint, 2000)
+                except Exception:
+                    pass
+        super().enterEvent(event)
+
+    def mousePressEvent(self, event):
+        if event.button() == Qt.MouseButton.LeftButton and callable(self._on_toggle):
+            try:
+                now = int(event.timestamp())
+                last = int(getattr(self, "_pfn_last_press_ts", 0) or 0)
+                interval = int(QApplication.styleHints().mouseDoubleClickInterval())
+                if last > 0 and 0 <= now - last < interval:
+                    event.accept()
+                    return
+                self._pfn_last_press_ts = now
+                self._on_toggle()
+            except Exception:
+                pass
+            event.accept()
+            return
+        super().mousePressEvent(event)
+
+
 class SubprojectTasksEditorDialog(QDialog):
     """子项目：上半待办任务（多行，一行一条，空行不保存）；下半项目时间节点（与任务分存储）。"""
 
@@ -708,7 +1324,7 @@ class SubprojectTasksEditorDialog(QDialog):
                 )
 
             self.combo.setStyleSheet("QComboBox{border:1px solid #DCDEE3; border-radius:6px; padding:0 8px;}")
-            self.date_edit.setStyleSheet("QDateEdit{border:1px solid #DCDEE3; border-radius:6px; padding:0 8px;}")
+            _style_pfn_date_edit(self.date_edit)
             self.date_text.setStyleSheet("QLineEdit{border:1px solid #DCDEE3; border-radius:6px; padding:0 8px;}")
 
             h.addWidget(self.combo, 0)
@@ -729,7 +1345,7 @@ class SubprojectTasksEditorDialog(QDialog):
             else:
                 self.combo.setCurrentText(self._custom_label)
 
-            if re.match(r"^\\d{4}-\\d{2}-\\d{2}$", date_str):
+            if re.match(r"^\d{4}-\d{2}-\d{2}$", date_str):
                 try:
                     from PyQt6.QtCore import QDate
 
@@ -758,7 +1374,7 @@ class SubprojectTasksEditorDialog(QDialog):
         super().__init__(parent)
         self.setWindowTitle(title)
         self._milestones_only = bool(milestones_only)
-        self._ms_preset_base = ["dry-run", "DBL", "FPI", "期中分析"]
+        self._ms_preset_base = ["DDL", "dry-run", "DBL", "FPI", "期中分析"]
         self._ms_preset = self._ms_preset_base + [self._MS_CUSTOM_LABEL]
 
         if self._milestones_only:
@@ -790,7 +1406,10 @@ class SubprojectTasksEditorDialog(QDialog):
             h2 = QLabel("项目时间节点")
             h2.setStyleSheet("color:#1F2329; font-size:15px; font-weight:600;")
             lay.addWidget(h2)
-            ex = QLabel("选择类型或选「（自定义）」后输入名称；日期可点选或手填（如「四月底」）。")
+            ex = QLabel(
+                "选择类型或选「（自定义）」后输入名称；日期可点选或手填（如「四月底」）。"
+                "每行右侧 × 可删除该节点。"
+            )
             ex.setWordWrap(True)
             ex.setStyleSheet("color:#86909C; font-size:12px;")
             lay.addWidget(ex)
@@ -798,7 +1417,10 @@ class SubprojectTasksEditorDialog(QDialog):
             h2 = QLabel("项目时间节点")
             h2.setStyleSheet("color:#1F2329; font-weight:600;")
             lay.addWidget(h2)
-            ex = QLabel("左侧选择节点类型（可自定义输入），右侧选择日期或手动输入（如“四月底”）。")
+            ex = QLabel(
+                "左侧选择节点类型（可自定义输入），右侧选择日期或手动输入（如“四月底”）。"
+                "每行右侧 × 可删除该节点。"
+            )
             ex.setStyleSheet("color:#86909C; font-size:11px;")
             lay.addWidget(ex)
 
@@ -826,12 +1448,30 @@ class SubprojectTasksEditorDialog(QDialog):
         self._ms_rows = []
         self._build_milestone_rows(milestones)
 
+        self._ms_add_first_btn = QPushButton("+ 添加时间节点")
+        self._ms_add_first_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        if self._milestones_only:
+            self._ms_add_first_btn.setStyleSheet(
+                "QPushButton{border:none;color:#165DFF;background:transparent;text-align:left;padding:4px 0;}"
+                "QPushButton:hover{color:#0E42D2;text-decoration:underline;}"
+            )
+        else:
+            self._ms_add_first_btn.setStyleSheet(
+                "QPushButton{border:none;color:#165DFF;background:transparent;text-align:left;padding:2px 0;font-size:11px;}"
+                "QPushButton:hover{color:#0E42D2;}"
+            )
+        self._ms_add_first_btn.clicked.connect(self._on_ms_add_first_clicked)
+        lay.addWidget(self._ms_add_first_btn, 0)
+        self._update_ms_add_first_btn_visible()
+
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         lay.addWidget(btns)
         if self._milestones_only:
-            self.setStyleSheet("QDialog{font-size:12px; color:#1F2329; background:#FFFFFF;}")
+            self.setStyleSheet(
+                "QDialog{font-size:12px; color:#1F2329; background:#FFFFFF;}" + _CALENDAR_POPUP_QSS
+            )
             ok_btn = btns.button(QDialogButtonBox.StandardButton.Ok)
             cancel_btn = btns.button(QDialogButtonBox.StandardButton.Cancel)
             _btn_ok = (
@@ -849,7 +1489,7 @@ class SubprojectTasksEditorDialog(QDialog):
             if cancel_btn is not None:
                 cancel_btn.setStyleSheet(_btn_cancel)
         else:
-            self.setStyleSheet("QDialog{font-size:12px; color:#1F2329;}")
+            self.setStyleSheet("QDialog{font-size:12px; color:#1F2329;}" + _CALENDAR_POPUP_QSS)
 
     def get_task_lines(self):
         text = self.edit_tasks.toPlainText()
@@ -863,13 +1503,9 @@ class SubprojectTasksEditorDialog(QDialog):
         order = {n.lower(): i for i, n in enumerate(self._ms_preset)}
         items.sort(key=lambda kv: (order.get(str(kv[0]).lower(), 999), str(kv[0]).lower()))
 
-        if not items:
-            self._add_ms_row()
-            return
         for n, dt in items:
             r = self._add_ms_row()
             r.set_values(n, dt)
-        self._add_ms_row()
 
     def _add_ms_row(self):
         row = SubprojectTasksEditorDialog._MilestoneRow(self, self._ms_preset, self._MS_CUSTOM_LABEL)
@@ -878,26 +1514,35 @@ class SubprojectTasksEditorDialog(QDialog):
         self._ms_rows.append(row)
         self._ms_layout.addWidget(row)
         self._update_ms_del_enabled()
+        self._update_ms_add_first_btn_visible()
         return row
+
+    def _on_ms_add_first_clicked(self):
+        self._add_ms_row()
+
+    def _update_ms_add_first_btn_visible(self):
+        btn = getattr(self, "_ms_add_first_btn", None)
+        if btn is None:
+            return
+        btn.setVisible(len(self._ms_rows) == 0)
 
     def _on_ms_add_clicked(self, _row):
         self._add_ms_row()
 
     def _on_ms_del_clicked(self, row):
-        if len(self._ms_rows) <= 1:
-            return
         try:
             self._ms_rows.remove(row)
         except ValueError:
             return
+        _teardown_pfn_date_edit(row.date_edit)
         row.setParent(None)
         row.deleteLater()
         self._update_ms_del_enabled()
+        self._update_ms_add_first_btn_visible()
 
     def _update_ms_del_enabled(self):
-        can_del = len(self._ms_rows) > 1
         for r in self._ms_rows:
-            r.btn_del.setEnabled(can_del)
+            r.btn_del.setEnabled(True)
 
     def get_milestones_dict(self):
         out = {}
@@ -908,53 +1553,728 @@ class SubprojectTasksEditorDialog(QDialog):
         return out
 
 
-class SingleTodoTaskEditDialog(QDialog):
-    """单条待办：内容、优先级、完成状态（与项目时间节点无关）。"""
+class MilestoneAddDialog(QDialog):
+    """为指定日期（或模糊月）向子项目添加单个时间节点。"""
 
-    def __init__(self, parent, title, task_dict, default_priority="中"):
+    _MS_CUSTOM_LABEL = "（自定义）"
+    _MS_PRESET = ["DDL", "dry-run", "DBL", "FPI", "期中分析", _MS_CUSTOM_LABEL]
+
+    def __init__(self, parent, title, subproject_options, default_year, default_month, default_day=0):
         super().__init__(parent)
-        self.setWindowTitle(title)
+        self.setWindowTitle(str(title or "添加节点"))
+        self.setMinimumWidth(420)
         self.resize(440, 280)
+        self.setModal(True)
         lay = QVBoxLayout(self)
-        lay.addWidget(QLabel("任务内容"))
-        self.edit_content = QTextEdit()
-        self.edit_content.setPlaceholderText("输入任务描述")
-        if task_dict and isinstance(task_dict, dict):
-            self.edit_content.setPlainText(str(task_dict.get("content", "") or ""))
-        lay.addWidget(self.edit_content)
+        lay.setContentsMargins(20, 16, 20, 14)
+        lay.setSpacing(10)
 
-        row = QHBoxLayout()
-        row.addWidget(QLabel("优先级"))
-        self.combo_pri = QComboBox()
-        self.combo_pri.addItems(["高", "中", "低"])
-        dp = str(default_priority or "中")
-        if dp not in ("高", "中", "低"):
-            dp = "中"
-        self.combo_pri.setCurrentText(dp)
-        if task_dict and isinstance(task_dict, dict):
-            tp = str(task_dict.get("priority", "") or "").strip()
-            if tp in ("高", "中", "低"):
-                self.combo_pri.setCurrentText(tp)
-        row.addWidget(self.combo_pri, 1)
-        lay.addLayout(row)
+        lay.addWidget(_pfn_dialog_section_label("子项目"))
+        self.combo_sub = QComboBox()
+        self.combo_sub.setFixedHeight(30)
+        for sk, label in subproject_options or []:
+            self.combo_sub.addItem(str(label), str(sk))
+        lay.addWidget(self.combo_sub)
 
-        self.chk_done = QCheckBox("标记为已完成")
-        done = False
-        if task_dict and isinstance(task_dict, dict):
-            s = task_dict.get("status", "未完成")
-            if s is True or s == 1:
-                done = True
-            else:
-                s = str(s or "").strip()
-                done = s in ("已完成", "完成", "done", "Done", "DONE")
-        self.chk_done.setChecked(done)
-        lay.addWidget(self.chk_done)
+        lay.addWidget(_pfn_dialog_section_label("节点类型"))
+        self.combo_type = QComboBox()
+        self.combo_type.setEditable(True)
+        self.combo_type.setInsertPolicy(QComboBox.InsertPolicy.NoInsert)
+        self.combo_type.setFixedHeight(30)
+        self.combo_type.addItems(self._MS_PRESET)
+        lay.addWidget(self.combo_type)
+
+        lay.addWidget(_pfn_dialog_section_label("日期"))
+        date_row = QHBoxLayout()
+        date_row.setSpacing(8)
+        self.date_edit = QDateEdit()
+        self.date_edit.setCalendarPopup(True)
+        self.date_edit.setDisplayFormat("yyyy-MM-dd")
+        self.date_edit.setFixedHeight(30)
+        try:
+            dy = int(default_day) if int(default_day or 0) >= 1 else 1
+            self.date_edit.setDate(QDate(int(default_year), int(default_month), dy))
+        except Exception:
+            self.date_edit.setDate(QDate.currentDate())
+        _style_pfn_date_edit(self.date_edit, install_delegate=False)
+        date_row.addWidget(self.date_edit, 0)
+        self.date_text = QLineEdit()
+        self.date_text.setPlaceholderText("可手输：如 四月底（优先于左侧日期）")
+        self.date_text.setFixedHeight(30)
+        self.date_text.setStyleSheet(
+            "QLineEdit{border:1px solid #E5E6EB;border-radius:8px;padding:0 8px;background:#FFFFFF;color:#1F2329;}"
+            "QLineEdit:focus{border-color:#165DFF;}"
+        )
+        date_row.addWidget(self.date_text, 1)
+        lay.addLayout(date_row)
 
         btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
         btns.accepted.connect(self.accept)
         btns.rejected.connect(self.reject)
         lay.addWidget(btns)
+        self.setStyleSheet(
+            "QDialog{font-size:12px; color:#1F2329; background:#FFFFFF;}" + _CALENDAR_POPUP_QSS
+        )
+
+    def get_sub_key(self) -> str:
+        try:
+            return str(self.combo_sub.currentData() or "").strip().lower()
+        except Exception:
+            return ""
+
+    def get_milestone_name(self) -> str:
+        name = str(self.combo_type.currentText() or "").strip()
+        if name == self._MS_CUSTOM_LABEL:
+            return ""
+        return name
+
+    def get_date_str(self) -> str:
+        txt = str(self.date_text.text() or "").strip()
+        if txt:
+            return txt
+        try:
+            return self.date_edit.date().toString("yyyy-MM-dd")
+        except Exception:
+            return ""
+
+
+_PERSONAL_TODO_IMAGE_EXT = frozenset(
+    {".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".tif", ".tiff", ".ico", ".heic", ".heif"}
+)
+
+
+def _pfn_personal_todo_is_image_path(path):
+    ext = os.path.splitext(path or "")[1].lower()
+    return ext in _PERSONAL_TODO_IMAGE_EXT
+
+
+def _pfn_load_pixmap_from_file(path: str) -> QPixmap:
+    """从磁盘加载图片；含中文等路径时 QPixmap(path) 偶发失败，回退 QImageReader / 内存解码。"""
+    p = str(path or "").strip()
+    if not p or not os.path.isfile(p):
+        return QPixmap()
+    pm = QPixmap(p)
+    if not pm.isNull():
+        return pm
+    try:
+        reader = QImageReader(p)
+        img = reader.read()
+        if not img.isNull():
+            return QPixmap.fromImage(img)
+    except Exception:
+        pass
+    try:
+        with open(p, "rb") as f:
+            data = f.read()
+        img = QImage.fromData(data)
+        if not img.isNull():
+            return QPixmap.fromImage(img)
+    except Exception:
+        pass
+    return QPixmap()
+
+
+def _pfn_dialog_section_label(text):
+    lb = QLabel(str(text))
+    lb.setStyleSheet("color:#4E5969; font-weight:600; font-size:11px;")
+    return lb
+
+
+def _todo_due_highlight(due: str, is_done: bool, today_s: str) -> str:
+    """返回截止高亮级别：normal | due_soon | due_today | overdue（仅 yyyy-MM-dd）。"""
+    if is_done:
+        return "normal"
+    due = str(due or "").strip()
+    if not due or len(due) != 10:
+        return "normal"
+    if due < today_s:
+        return "overdue"
+    if due == today_s:
+        return "due_today"
+    try:
+        today = datetime.strptime(today_s, "%Y-%m-%d").date()
+        due_d = datetime.strptime(due, "%Y-%m-%d").date()
+        if due_d == today + timedelta(days=1):
+            return "due_soon"
+    except Exception:
+        pass
+    return "normal"
+
+
+def _todo_task_body_style(due_level: str, is_done: bool, *, with_border_none: bool = False) -> str:
+    suffix = " border:none; background:transparent;" if with_border_none else ""
+    if is_done:
+        return f"color:#86909C;{suffix}"
+    if due_level == "overdue":
+        return f"color:#D03050;{suffix}"
+    if due_level == "due_today":
+        return f"color:#D03050; font-weight:600;{suffix}"
+    if due_level == "due_soon":
+        return f"color:#B75A00;{suffix}"
+    return f"color:#1F2329;{suffix}"
+
+
+def _todo_task_meta_style(due_level: str, is_done: bool) -> str:
+    if is_done:
+        return "color:#C9CDD4; border:none; background:transparent;"
+    if due_level in ("overdue", "due_today", "due_soon"):
+        color = "#D03050" if due_level == "overdue" else "#B75A00"
+        return f"color:{color}; border:none; background:transparent;"
+    return "color:#86909C; border:none; background:transparent;"
+
+
+def _pfn_personal_todo_attach_badge(count, is_done, due_level="normal"):
+    """待办列表：附件标记（圆角徽章，与卡片状态配色一致）。"""
+    try:
+        n = int(count)
+    except Exception:
+        n = 0
+    if n <= 0:
+        return None
+    badge = QLabel("📎")
+    badge.setFixedSize(24, 22)
+    badge.setAlignment(Qt.AlignmentFlag.AlignCenter)
+    if is_done:
+        badge.setStyleSheet(
+            "QLabel{background:#EEF0F3;color:#86909C;border:1px solid #D9DCDE;border-radius:6px;font-size:11px;}"
+        )
+    elif due_level == "overdue":
+        badge.setStyleSheet(
+            "QLabel{background:#FFF0ED;color:#D03050;border:1px solid #F2C7C0;border-radius:6px;font-size:11px;}"
+        )
+    elif due_level == "due_today":
+        badge.setStyleSheet(
+            "QLabel{background:#FFF7E8;color:#B75A00;border:1px solid #F0D9B8;border-radius:6px;font-size:11px;}"
+        )
+    elif due_level == "due_soon":
+        badge.setStyleSheet(
+            "QLabel{background:#FFFBF0;color:#B75A00;border:1px solid #F0D9B8;border-radius:6px;font-size:11px;}"
+        )
+    else:
+        badge.setStyleSheet(
+            "QLabel{background:#E8F3FF;color:#165DFF;border:1px solid #BEDAFF;border-radius:6px;font-size:11px;}"
+        )
+    badge.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+    return badge
+
+
+class PersonalTodoImagePreviewDialog(QDialog):
+    def __init__(self, parent, image_path):
+        super().__init__(parent)
+        # 非模态：不阻塞主界面；父级为 QMainWindow 时，关闭子任务编辑框不会顺带销毁本窗口
+        self.setModal(False)
+        self.setWindowModality(Qt.WindowModality.NonModal)
+        self.setWindowTitle("图片预览")
+        self.resize(720, 560)
+        lay = QVBoxLayout(self)
+        sc = QScrollArea()
+        sc.setWidgetResizable(True)
+        inner = QLabel()
+        inner.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        pm = _pfn_load_pixmap_from_file(str(image_path or ""))
+        if not pm.isNull():
+            inner.setPixmap(pm)
+        else:
+            inner.setText("无法加载图片")
+        sc.setWidget(inner)
+        lay.addWidget(sc, 1)
+        bb = QDialogButtonBox(QDialogButtonBox.StandardButton.Close)
+        bb.rejected.connect(self.reject)
+        lay.addWidget(bb)
         self.setStyleSheet("QDialog{font-size:12px; color:#1F2329;}")
+
+
+class _PersonalTodoDropTextEdit(QTextEdit):
+    """任务内容框：支持拖入文件作为附件。"""
+
+    files_dropped = pyqtSignal(list)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+        else:
+            super().dragEnterEvent(e)
+
+    def dragMoveEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+        else:
+            super().dragMoveEvent(e)
+
+    def dropEvent(self, e):
+        if e.mimeData().hasUrls():
+            paths = []
+            for u in e.mimeData().urls():
+                p = u.toLocalFile()
+                if p and os.path.isfile(p):
+                    paths.append(p)
+            if paths:
+                self.files_dropped.emit(paths)
+            e.acceptProposedAction()
+        else:
+            super().dropEvent(e)
+
+
+class _PersonalTodoAttachDropFrame(QFrame):
+    files_dropped = pyqtSignal(list)
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self.setAcceptDrops(True)
+
+    def dragEnterEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+        else:
+            super().dragEnterEvent(e)
+
+    def dragMoveEvent(self, e):
+        if e.mimeData().hasUrls():
+            e.acceptProposedAction()
+        else:
+            super().dragMoveEvent(e)
+
+    def dropEvent(self, e):
+        if e.mimeData().hasUrls():
+            paths = []
+            for u in e.mimeData().urls():
+                p = u.toLocalFile()
+                if p and os.path.isfile(p):
+                    paths.append(p)
+            if paths:
+                self.files_dropped.emit(paths)
+            e.acceptProposedAction()
+        else:
+            super().dropEvent(e)
+
+
+class _PersonalTodoClickLabel(QLabel):
+    """附件列表中的文件名链接：单击立即打开。"""
+
+    left_clicked = pyqtSignal()
+
+    def mousePressEvent(self, e):
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.left_clicked.emit()
+        super().mousePressEvent(e)
+
+
+class _PersonalTodoThumbLabel(QLabel):
+    """附件缩略图：单击延迟打开预览，避免双击时重复打开或误触主窗口双击逻辑。"""
+
+    left_clicked = pyqtSignal()
+
+    def __init__(self, parent=None):
+        super().__init__(parent)
+        self._left_click_timer = QTimer(self)
+        self._left_click_timer.setSingleShot(True)
+        self._left_click_timer.timeout.connect(self._emit_left_clicked_deferred)
+
+    def _emit_left_clicked_deferred(self):
+        self.left_clicked.emit()
+
+    def mousePressEvent(self, e):
+        super().mousePressEvent(e)
+        if e.button() != Qt.MouseButton.LeftButton:
+            return
+        if self._left_click_timer.isActive():
+            self._left_click_timer.stop()
+            return
+        ms = int(QApplication.styleHints().mouseDoubleClickInterval())
+        self._left_click_timer.start(max(200, ms + 40))
+
+    def mouseDoubleClickEvent(self, e):
+        self._left_click_timer.stop()
+        if e.button() == Qt.MouseButton.LeftButton:
+            self.left_clicked.emit()
+        e.accept()
+
+
+class PersonalTodoTaskEditDialog(QDialog):
+    """个人待办或「我的待办」项目子任务：内容、附件、优先级、截止日期、完成状态。"""
+
+    def __init__(self, parent, title, task_dict=None, config=None, task_id=None, project_sub_key=None, default_priority="中"):
+        super().__init__(parent)
+        self._cfg = config
+        tid = str(task_id or "").strip()
+        if not tid and isinstance(task_dict, dict):
+            tid = str(task_dict.get("id", "") or "").strip()
+        self._task_id = tid
+        ps = str(project_sub_key or "").strip().lower()
+        self._project_sub_key = ps if ps else None
+        self._thumb_row = None
+        self._file_list_col = None
+        self._rels_added_session = set()
+        self._pending_add_abs = set()
+        self._removed_initial = set()
+        self._current = []
+
+        self.setWindowTitle(title)
+        self.resize(480, 460)
+        lay = QVBoxLayout(self)
+        lay.setContentsMargins(16, 14, 16, 12)
+        lay.setSpacing(8)
+
+        lay.addWidget(_pfn_dialog_section_label("任务内容"))
+        self.edit_content = _PersonalTodoDropTextEdit()
+        self.edit_content.setPlaceholderText("输入任务描述（可拖入文件添加附件）")
+        self.edit_content.setMinimumHeight(56)
+        self.edit_content.setMaximumHeight(88)
+        self.edit_content.setStyleSheet(
+            "QTextEdit{border:1px solid #E5E6EB;border-radius:8px;padding:6px 8px;background:#FFFFFF;color:#1F2329;font-size:12px;}"
+            "QTextEdit:focus{border-color:#165DFF;}"
+        )
+        lay.addWidget(self.edit_content)
+
+        lay.addWidget(_pfn_dialog_section_label("附件"))
+        self._drop_frame = _PersonalTodoAttachDropFrame()
+        self._drop_frame.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        self._drop_frame.setStyleSheet(
+            "QFrame{background:#FAFBFC; border:1px solid #E5E6EB; border-radius:8px;}"
+        )
+        self._drop_frame.files_dropped.connect(self._import_local_paths)
+        dlay = QVBoxLayout(self._drop_frame)
+        dlay.setContentsMargins(12, 10, 12, 10)
+        dlay.setSpacing(8)
+        row_btn = QHBoxLayout()
+        row_btn.setSpacing(8)
+        self.btn_add_attach = QPushButton("+ 添加附件")
+        self.btn_add_attach.setCursor(Qt.CursorShape.PointingHandCursor)
+        self.btn_add_attach.setStyleSheet(
+            "QPushButton{background:#FFFFFF;border:1px solid #C9CDD4;border-radius:6px;color:#1F2329;"
+            "padding:5px 12px;font-size:11px;font-weight:500;}"
+            "QPushButton:hover{border-color:#165DFF;color:#165DFF;background:#F7F9FF;}"
+            "QPushButton:pressed{background:#E8F3FF;}"
+        )
+        self.btn_add_attach.clicked.connect(self._pick_files)
+        row_btn.addWidget(self.btn_add_attach, 0)
+        hint = QLabel("可拖入下方区域或任务内容框")
+        hint.setStyleSheet("color:#86909C; font-size:10px;")
+        hint.setWordWrap(True)
+        row_btn.addWidget(hint, 1, Qt.AlignmentFlag.AlignVCenter)
+        dlay.addLayout(row_btn)
+
+        self._thumb_scroll = QScrollArea()
+        self._thumb_scroll.setFixedHeight(108)
+        self._thumb_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAsNeeded)
+        self._thumb_scroll.setVerticalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self._thumb_scroll.setWidgetResizable(True)
+        self._thumb_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self._thumb_row = QWidget()
+        self._thumb_row.setStyleSheet("background:transparent;")
+        self._thumb_layout = QHBoxLayout(self._thumb_row)
+        self._thumb_layout.setContentsMargins(0, 0, 0, 0)
+        self._thumb_layout.setSpacing(8)
+        self._thumb_layout.addStretch(1)
+        self._thumb_scroll.setWidget(self._thumb_row)
+        dlay.addWidget(self._thumb_scroll)
+
+        self._file_list_col = QWidget()
+        self._file_list_layout = QVBoxLayout(self._file_list_col)
+        self._file_list_layout.setContentsMargins(0, 0, 0, 0)
+        self._file_list_layout.setSpacing(6)
+        dlay.addWidget(self._file_list_col, 0)
+        lay.addWidget(self._drop_frame, 0)
+
+        row_pri = QHBoxLayout()
+        row_pri.addWidget(QLabel("优先级"))
+        self.combo_pri = QComboBox()
+        self.combo_pri.addItems(["高", "中", "低"])
+        _dp = str(default_priority or "中").strip()
+        if _dp not in ("高", "中", "低"):
+            _dp = "中"
+        self.combo_pri.setCurrentText(_dp)
+        row_pri.addWidget(self.combo_pri, 1)
+        lay.addLayout(row_pri)
+
+        row_due = QHBoxLayout()
+        row_due.addWidget(QLabel("截止日期"))
+        self.date_due = QDateEdit()
+        self.date_due.setCalendarPopup(True)
+        self.date_due.setDisplayFormat("yyyy-MM-dd")
+        self.date_due.setDate(QDate.currentDate())
+        self.date_due.setKeyboardTracking(False)
+        _style_pfn_date_edit(self.date_due)
+        row_due.addWidget(self.date_due, 1)
+        self.chk_no_due = QCheckBox("不设置日期")
+        self.chk_no_due.setChecked(True)
+        row_due.addWidget(self.chk_no_due, 0)
+        lay.addLayout(row_due)
+        self.chk_no_due.toggled.connect(lambda x: self.date_due.setEnabled(not bool(x)))
+
+        self.chk_done = QCheckBox("标记为已完成")
+        lay.addWidget(self.chk_done)
+
+        if isinstance(task_dict, dict):
+            self.edit_content.setPlainText(str(task_dict.get("content", "") or ""))
+            tp = str(task_dict.get("priority", "") or "").strip()
+            if tp in ("高", "中", "低"):
+                self.combo_pri.setCurrentText(tp)
+            s = task_dict.get("status", "未完成")
+            if s is True or s == 1:
+                self.chk_done.setChecked(True)
+            else:
+                s = str(s or "未完成").strip()
+                self.chk_done.setChecked(s in ("已完成", "完成", "done", "Done", "DONE"))
+            due = str(task_dict.get("due_date", "") or "").strip()
+            if due:
+                qd = QDate.fromString(due, "yyyy-MM-dd")
+                if qd.isValid():
+                    self.date_due.setDate(qd)
+                    self.chk_no_due.setChecked(False)
+        self.date_due.setEnabled(not self.chk_no_due.isChecked())
+
+        if self._cfg is not None and self._task_id:
+            raw_att = task_dict.get("attachments") if isinstance(task_dict, dict) else []
+            if self._project_sub_key:
+                self._current = list(
+                    ConfigManager._normalize_project_task_attachments_list(raw_att, self._project_sub_key, self._task_id)
+                )
+            else:
+                self._current = list(ConfigManager._normalize_personal_task_attachments_list(raw_att, self._task_id))
+            self._rebuild_attachment_widgets()
+        self.edit_content.files_dropped.connect(self._import_local_paths)
+
+        lay.addStretch(1)
+
+        btns = QDialogButtonBox(QDialogButtonBox.StandardButton.Ok | QDialogButtonBox.StandardButton.Cancel)
+        btns.accepted.connect(self.accept)
+        btns.rejected.connect(self.reject)
+        lay.addWidget(btns)
+        self.setStyleSheet("QDialog{font-size:12px; color:#1F2329;}" + _CALENDAR_POPUP_QSS)
+
+    def _abs_for_rel(self, rel) -> str:
+        if not self._cfg:
+            return ""
+        if self._project_sub_key:
+            fn = getattr(self._cfg, "abs_path_project_task_attachment", None)
+            return str(fn(rel) or "") if callable(fn) else ""
+        fn = getattr(self._cfg, "abs_path_personal_task_attachment", None)
+        return str(fn(rel) or "") if callable(fn) else ""
+
+    def _dest_dir(self):
+        if not self._cfg or not self._task_id:
+            return ""
+        if self._project_sub_key:
+            fn = getattr(self._cfg, "ensure_project_task_attachment_dir", None)
+            return fn(self._project_sub_key, self._task_id) if callable(fn) else ""
+        fn = getattr(self._cfg, "ensure_personal_task_attachment_dir", None)
+        return fn(self._task_id) if callable(fn) else ""
+
+    def _unique_name_in_dir(self, dest_dir, base_name):
+        base_name = os.path.basename(str(base_name or "")) or "file"
+        name, ext = os.path.splitext(base_name)
+        name = re.sub(r'[<>:"/\\|?*\x00-\x1f]', "_", name).strip() or "file"
+        ext = re.sub(r'[^.A-Za-z0-9_-]', "", ext)[:16]
+        c = 0
+        while True:
+            fn = f"{name}{ext}" if c == 0 else f"{name}_{c}{ext}"
+            p = os.path.join(dest_dir, fn)
+            if not os.path.exists(p):
+                return fn, p
+            c += 1
+            if c > 5000:
+                fn = f"{name}_{uuid.uuid4().hex[:8]}{ext}"
+                return fn, os.path.join(dest_dir, fn)
+
+    def _import_local_paths(self, paths):
+        if not paths or self._cfg is None or not self._task_id:
+            return
+        dest_dir = self._dest_dir()
+        if not dest_dir:
+            return
+        for src in paths:
+            src = str(src or "").strip()
+            if not src or not os.path.isfile(src):
+                continue
+            bn, dest_abs = self._unique_name_in_dir(dest_dir, os.path.basename(src))
+            try:
+                shutil.copy2(src, dest_abs)
+            except Exception:
+                continue
+            if self._project_sub_key:
+                sk = ConfigManager._safe_attachment_path_segment(self._project_sub_key)
+                rel = f"{sk}/{self._task_id}/{bn}"
+            else:
+                rel = f"{self._task_id}/{bn}"
+            if rel in self._current:
+                continue
+            self._current.append(rel)
+            self._rels_added_session.add(rel)
+            self._pending_add_abs.add(dest_abs)
+        self._rebuild_attachment_widgets()
+
+    def _pick_files(self):
+        paths, _ = QFileDialog.getOpenFileNames(self, "选择附件", "", "所有文件 (*.*)")
+        if paths:
+            self._import_local_paths(paths)
+
+    def _rebuild_attachment_widgets(self):
+        while self._thumb_layout.count():
+            item = self._thumb_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        while self._file_list_layout.count():
+            item = self._file_list_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.deleteLater()
+        self._thumb_layout.addStretch(1)
+        if not self._current:
+            self._thumb_scroll.hide()
+            empty = QLabel("将文件拖入此处，或点击「添加附件」")
+            empty.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            empty.setMinimumHeight(52)
+            empty.setWordWrap(True)
+            empty.setStyleSheet(
+                "color:#86909C; font-size:10px; background:#FFFFFF; border:1px dashed #D9DCE0;"
+                "border-radius:8px; padding:10px 12px;"
+            )
+            self._file_list_layout.addWidget(empty)
+            return
+        images = []
+        others = []
+        for rel in self._current:
+            ap = self._abs_for(rel)
+            if ap and os.path.isfile(ap) and _pfn_personal_todo_is_image_path(ap):
+                images.append((rel, ap))
+            else:
+                others.append((rel, ap))
+        if images:
+            self._thumb_scroll.show()
+        else:
+            self._thumb_scroll.hide()
+        for rel, ap in images:
+            cell = QFrame()
+            cell.setFixedSize(108, 108)
+            cell.setStyleSheet(
+                "QFrame{background:#FFFFFF; border:1px solid #E5E6EB; border-radius:8px;}"
+                "QFrame:hover{border-color:#C9CDD4;}"
+            )
+            cly = QVBoxLayout(cell)
+            cly.setContentsMargins(4, 4, 4, 4)
+            cly.setSpacing(2)
+            thumb = _PersonalTodoThumbLabel()
+            thumb.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            thumb.setCursor(Qt.CursorShape.PointingHandCursor)
+            pm = _pfn_load_pixmap_from_file(ap)
+            if not pm.isNull():
+                thumb.setPixmap(pm.scaled(100, 100, Qt.AspectRatioMode.KeepAspectRatio, Qt.TransformationMode.SmoothTransformation))
+            else:
+                thumb.setText("?")
+            thumb.left_clicked.connect(partial(self._preview_image, ap))
+            cly.addWidget(thumb, 0, Qt.AlignmentFlag.AlignCenter)
+            hx = QHBoxLayout()
+            hx.addStretch(1)
+            bx = QPushButton("×")
+            bx.setFixedSize(24, 24)
+            bx.setCursor(Qt.CursorShape.PointingHandCursor)
+            bx.setStyleSheet(
+                "QPushButton{border:none;color:#86909C;font-size:14px;font-weight:600;border-radius:12px;}"
+                "QPushButton:hover{color:#D03050;background:rgba(208,48,80,0.08);}"
+            )
+            bx.clicked.connect(partial(self._remove_attachment, rel))
+            hx.addWidget(bx, 0)
+            cly.addLayout(hx)
+            self._thumb_layout.insertWidget(self._thumb_layout.count() - 1, cell)
+        for rel, ap in others:
+            row = QFrame()
+            row.setStyleSheet(
+                "QFrame{background:#FFFFFF;border:1px solid #EEF0F3;border-radius:6px;}"
+                "QFrame:hover{border-color:#E5E6EB;}"
+            )
+            rlay = QHBoxLayout(row)
+            rlay.setContentsMargins(8, 5, 6, 5)
+            link = _PersonalTodoClickLabel(os.path.basename(rel.split("/")[-1]))
+            link.setCursor(Qt.CursorShape.PointingHandCursor)
+            link.setStyleSheet("color:#165DFF; font-size:11px; font-weight:500;")
+            if ap and os.path.isfile(ap):
+                link.setToolTip(ap)
+                link.left_clicked.connect(partial(self._open_path, ap))
+            else:
+                link.setStyleSheet("color:#C9CDD4; font-size:11px;")
+                link.setToolTip("文件不存在")
+            rlay.addWidget(link, 1)
+            bx = QPushButton("×")
+            bx.setFixedSize(24, 24)
+            bx.setCursor(Qt.CursorShape.PointingHandCursor)
+            bx.setStyleSheet(
+                "QPushButton{border:none;color:#86909C;font-size:14px;font-weight:600;border-radius:12px;}"
+                "QPushButton:hover{color:#D03050;background:rgba(208,48,80,0.08);}"
+            )
+            bx.clicked.connect(partial(self._remove_attachment, rel))
+            rlay.addWidget(bx, 0)
+            self._file_list_layout.addWidget(row)
+
+    def _abs_for(self, rel) -> str:
+        return self._abs_for_rel(rel)
+
+    def _preview_image(self, abs_path):
+        host = self.parentWidget()
+        p = host
+        while p is not None and not isinstance(p, QMainWindow):
+            p = p.parentWidget()
+        if p is not None:
+            host = p
+        dlg = PersonalTodoImagePreviewDialog(host, abs_path)
+        dlg.setAttribute(Qt.WidgetAttribute.WA_DeleteOnClose, True)
+        dlg.show()
+
+    def _open_path(self, abs_path):
+        p = str(abs_path or "")
+        if p and os.path.isfile(p):
+            QDesktopServices.openUrl(QUrl.fromLocalFile(p))
+
+    def _remove_attachment(self, rel):
+        rel = str(rel or "")
+        if not rel or rel not in self._current:
+            return
+        ap = self._abs_for(rel)
+        if rel in self._rels_added_session:
+            try:
+                if ap and os.path.isfile(ap):
+                    os.remove(ap)
+            except Exception:
+                pass
+            self._rels_added_session.discard(rel)
+            if ap:
+                self._pending_add_abs.discard(ap)
+        else:
+            self._removed_initial.add(rel)
+        self._current = [x for x in self._current if x != rel]
+        self._rebuild_attachment_widgets()
+
+    def _rollback_new_files(self):
+        for ap in list(self._pending_add_abs):
+            try:
+                if ap and os.path.isfile(ap):
+                    os.remove(ap)
+            except Exception:
+                pass
+        self._pending_add_abs.clear()
+        self._rels_added_session.clear()
+
+    def reject(self):
+        self._rollback_new_files()
+        super().reject()
+
+    def accept(self):
+        for rel in list(self._removed_initial):
+            ap = self._abs_for(rel)
+            try:
+                if ap and os.path.isfile(ap):
+                    os.remove(ap)
+            except Exception:
+                pass
+        self._removed_initial.clear()
+        self._pending_add_abs.clear()
+        self._rels_added_session.clear()
+        super().accept()
 
     def get_content(self):
         return str(self.edit_content.toPlainText() or "").strip()
@@ -965,6 +2285,14 @@ class SingleTodoTaskEditDialog(QDialog):
 
     def is_done(self):
         return self.chk_done.isChecked()
+
+    def get_due_date(self):
+        if self.chk_no_due.isChecked():
+            return ""
+        return str(self.date_due.date().toString("yyyy-MM-dd") or "").strip()
+
+    def get_attachments(self):
+        return list(self._current)
 
 
 class SimplePieChartWidget(QWidget):
@@ -1769,6 +3097,114 @@ class PFNCore:
         except Exception as e:
             return False, str(e)
 
+    _WORD_TO_PDF_EXTS = frozenset({".doc", ".docx", ".rtf"})
+    _WD_EXPORT_FORMAT_PDF = 17
+
+    def convert_word_rtf_to_pdf(self, paths, progress_callback=None, cancel_check=None):
+        """将 .doc/.docx/.rtf 转为同目录 PDF。返回 [{src, out, ok, err}, ...]。"""
+        results = []
+        norm_paths = []
+        for p in paths or []:
+            if not p:
+                continue
+            try:
+                np = os.path.normpath(os.path.abspath(os.fspath(p))).replace("/", "\\")
+            except Exception:
+                np = os.path.normpath(str(p)).replace("/", "\\")
+            if np not in norm_paths:
+                norm_paths.append(np)
+        if not norm_paths:
+            return results
+
+        co_initialized = False
+        word = None
+        word_err = None
+        try:
+            import pythoncom
+
+            pythoncom.CoInitialize()
+            co_initialized = True
+        except Exception:
+            pass
+        try:
+            import win32com.client
+
+            word = win32com.client.DispatchEx("Word.Application")
+            word.Visible = False
+            word.DisplayAlerts = 0
+        except Exception as e:
+            word_err = "未检测到 Microsoft Word，请确认已安装 Office"
+            if str(e).strip():
+                word_err = f"{word_err}（{e}）"
+
+        if word is None:
+            for src in norm_paths:
+                pdf_path = os.path.splitext(src)[0] + ".pdf"
+                results.append({"src": src, "out": pdf_path, "ok": False, "err": word_err or "无法启动 Word"})
+            if co_initialized:
+                try:
+                    import pythoncom
+
+                    pythoncom.CoUninitialize()
+                except Exception:
+                    pass
+            return results
+
+        total = len(norm_paths)
+        for idx, src in enumerate(norm_paths):
+            if cancel_check and cancel_check():
+                break
+            if progress_callback:
+                try:
+                    progress_callback(idx + 1, total, os.path.basename(src))
+                except Exception:
+                    pass
+            pdf_path = os.path.splitext(src)[0] + ".pdf"
+            entry = {"src": src, "out": pdf_path, "ok": False, "err": ""}
+            results.append(entry)
+            ext = os.path.splitext(src)[1].lower()
+            if ext not in self._WORD_TO_PDF_EXTS:
+                entry["err"] = "不支持的文件类型"
+                continue
+            if not os.path.isfile(src):
+                entry["err"] = "文件不存在"
+                continue
+            doc = None
+            try:
+                doc = word.Documents.Open(
+                    FileName=src,
+                    ConfirmConversions=False,
+                    ReadOnly=True,
+                    AddToRecentFiles=False,
+                )
+                doc.ExportAsFixedFormat(
+                    OutputFileName=pdf_path,
+                    ExportFormat=self._WD_EXPORT_FORMAT_PDF,
+                    OpenAfterExport=False,
+                )
+                entry["ok"] = True
+            except Exception as e:
+                entry["err"] = str(e).strip() or "转换失败"
+            finally:
+                if doc is not None:
+                    try:
+                        doc.Close(SaveChanges=False)
+                    except Exception:
+                        pass
+
+        try:
+            word.Quit()
+        except Exception:
+            pass
+        if co_initialized:
+            try:
+                import pythoncom
+
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+        return results
+
     def open_xml_with_excel(self, path):
         """
         XML 文件：无弹窗，直接用 Excel 打开。
@@ -2035,6 +3471,8 @@ class SasOpenWithDialog(QDialog):
 
 class QtMainWindow(QMainWindow):
     refresh_folder_done = pyqtSignal(object, object, object)  # item, err(str|None), result(list)
+    word_pdf_convert_progress = pyqtSignal(int, int, str)  # current, total, filename
+    word_pdf_convert_finished = pyqtSignal(object)  # results list
     # SAS EG 自动化等待时间（精准等待 + 缩短启动到展开间隔）
     SHORT_WAIT = 0.2   # 短等待（控件就绪）
     MEDIUM_WAIT = 0.6  # 中等等待（节点展开/界面刷新）
@@ -2058,6 +3496,8 @@ class QtMainWindow(QMainWindow):
         self._fs_view_state_by_pid = {}  # fav_id / __utility__ -> {v,h,split} 右侧资源管理器滚动与分割条
         self._restoring_fav_expand_state = False
         self._fav_tree_rebuilding = False  # clear() 时勿把空树写入展开状态
+        self._restoring_fs_expand_state = False
+        self._fs_tree_rebuilding = False  # 右侧 tree.clear() 时勿把空树写入 fs_expanded
         self._page_pm = None
         self._page_explorer = None
         self._right_stack = None
@@ -2072,6 +3512,7 @@ class QtMainWindow(QMainWindow):
         except Exception:
             self._pm_thread_pool = None
         self._todo_product_expanded = {}
+        self._todo_subproject_expanded = {}
         try:
             getter = getattr(self.core.config, "get_todo_product_expanded", None)
             d = getter() if callable(getter) else {}
@@ -2079,6 +3520,18 @@ class QtMainWindow(QMainWindow):
                 self._todo_product_expanded = {str(k): bool(v) for k, v in d.items()}
         except Exception:
             pass
+        try:
+            getter = getattr(self.core.config, "get_todo_subproject_expanded", None)
+            d = getter() if callable(getter) else {}
+            if isinstance(d, dict) and d:
+                self._todo_subproject_expanded = {str(k).strip().lower(): bool(v) for k, v in d.items()}
+        except Exception:
+            pass
+        # 待办「项目子任务」行：单击延迟定位左侧树，避免双击打开编辑时先触发一次定位
+        self._pfn_todo_focus_tree_timer = QTimer(self)
+        self._pfn_todo_focus_tree_timer.setSingleShot(True)
+        self._pfn_todo_focus_tree_timer.timeout.connect(self._pfn_todo_run_pending_tree_focus)
+        self._pfn_todo_focus_tree_pending_sk = ""
         self.setWindowTitle("PFN - 临床试验项目导航")
         # 主窗口图标：
         # 1) 优先从 exe 同级根目录 icon.ico 读取（满足 Windows 任务栏“固定/不固定”一致取图标）
@@ -2116,7 +3569,12 @@ class QtMainWindow(QMainWindow):
         self._load_favorites()
         # _load_favorites 末尾已调用 _refresh_project_management_panel，无需再定时全量刷新，避免启动重复刷新与连带弹窗
         self.refresh_folder_done.connect(self._apply_refresh_folder_result)
+        self.word_pdf_convert_progress.connect(self._on_word_pdf_convert_progress)
+        self.word_pdf_convert_finished.connect(self._on_word_pdf_convert_finished)
+        self._word_pdf_progress_dlg = None
+        self._word_pdf_cancel_requested = False
         QTimer.singleShot(800, self._check_pywin32_at_startup)
+        QTimer.singleShot(1500, self._pfn_show_active_config_path_hint)
         # 若以控制台模式启动，提示使用 pythonw/.pyw 根治“一闪而过”的 python 弹框
         if sys.platform == "win32":
             try:
@@ -2143,6 +3601,56 @@ class QtMainWindow(QMainWindow):
             self._pfn_todo_after_show_done = True
             # 仅一次：避免与 _load_favorites 末尾刷新叠加导致重复重建与弹窗链
             QTimer.singleShot(0, self._rebuild_todo_panel)
+            QTimer.singleShot(200, self._check_personal_due_alert_once)
+
+    def _pfn_todo_run_pending_tree_focus(self):
+        sk = str(getattr(self, "_pfn_todo_focus_tree_pending_sk", "") or "").strip().lower()
+        self._pfn_todo_focus_tree_pending_sk = ""
+        if sk:
+            self._focus_tree_subproject(sk)
+
+    def _pfn_show_active_config_path_hint(self):
+        """提示当前 config.json 实际路径，避免打包后误以为应看 exe 旁文件。"""
+        try:
+            p = str(getattr(self.core.config, "config_path", "") or "").strip()
+            if not p:
+                return
+            if len(p) > 120:
+                p = p[:48] + " … " + p[-58:]
+            self.statusBar().showMessage(f"当前配置保存路径：{p}", 14000)
+        except Exception:
+            pass
+
+    def _check_personal_due_alert_once(self):
+        getter = getattr(self.core.config, "get_personal_tasks", None)
+        get_last = getattr(self.core.config, "get_personal_due_alert_date", None)
+        set_last = getattr(self.core.config, "set_personal_due_alert_date", None)
+        if not callable(getter) or not callable(get_last) or not callable(set_last):
+            return
+        today_s = datetime.now().strftime("%Y-%m-%d")
+        if str(get_last() or "") == today_s:
+            return
+        tasks = getter()
+        if not isinstance(tasks, list):
+            return
+        due_today = []
+        for t in tasks:
+            if not isinstance(t, dict):
+                continue
+            if self._normalize_task_status(t) == "已完成":
+                continue
+            due = str(t.get("due_date", "") or "").strip()
+            if due == today_s:
+                due_today.append(t)
+        if not due_today:
+            return
+        lines = []
+        for t in due_today:
+            pri = str(t.get("priority", "中") or "中")
+            txt = str(t.get("content", "") or "").strip() or "（无内容）"
+            lines.append(f"• [{pri}] {txt}")
+        QMessageBox.information(self, "今日到期提醒", "以下个人待办今天到期：\n\n" + "\n".join(lines))
+        set_last(today_s)
 
     def _force_taskbar_icon_win32(self):
         if sys.platform != "win32":
@@ -2191,6 +3699,12 @@ class QtMainWindow(QMainWindow):
             saver = getattr(self.core.config, "save_todo_product_expanded_snapshot", None)
             if callable(saver) and isinstance(getattr(self, "_todo_product_expanded", None), dict):
                 saver(self._todo_product_expanded)
+        except Exception:
+            pass
+        try:
+            saver = getattr(self.core.config, "save_todo_subproject_expanded_snapshot", None)
+            if callable(saver) and isinstance(getattr(self, "_todo_subproject_expanded", None), dict):
+                saver(self._todo_subproject_expanded)
         except Exception:
             pass
         super().closeEvent(event)
@@ -2255,23 +3769,20 @@ class QtMainWindow(QMainWindow):
         left.setMaximumWidth(280)
         left.setStyleSheet("background:#FAFBFC; border-right:1px solid #E5E6EB;")
         left_layout = QVBoxLayout(left)
+        left_layout.setSpacing(8)
         self.utility_path = os.path.normpath("Z:\\projects\\utility").replace("/", "\\")
         utility_frame = QFrame()
         utility_frame.setStyleSheet(
-            "QFrame#utilityFrame { background:#F5F7FA; border-radius:8px; padding:6px 12px; min-height:24px; } "
-            "QFrame#utilityFrame:hover { background:#EBEDF0; } "
+            "QFrame#utilityFrame { background:#F7F9FC; border:1px solid #E5EAF2; border-radius:10px; padding:6px 12px; min-height:28px; } "
+            "QFrame#utilityFrame:hover { background:#EEF3FA; border-color:#C7D5EA; } "
             "QLabel#utilityLabel { color:#1F2329; font-family:'Microsoft YaHei'; font-size:12px; background:transparent; } "
         )
         utility_frame.setObjectName("utilityFrame")
         utility_frame.setCursor(Qt.CursorShape.PointingHandCursor)
-        util_shadow = QGraphicsDropShadowEffect()
-        util_shadow.setBlurRadius(4)
-        util_shadow.setXOffset(0)
-        util_shadow.setYOffset(2)
-        util_shadow.setColor(QColor(0, 0, 0, 13))
-        utility_frame.setGraphicsEffect(util_shadow)
+        # 去掉卡片阴影，避免某些缩放比例下出现右侧竖线伪影
+        utility_frame.setGraphicsEffect(None)
         utility_layout = QHBoxLayout(utility_frame)
-        utility_layout.setContentsMargins(12, 6, 12, 6)
+        utility_layout.setContentsMargins(12, 8, 12, 8)
         utility_label = QLabel("Utility 公共目录")
         utility_label.setObjectName("utilityLabel")
         utility_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -2285,19 +3796,15 @@ class QtMainWindow(QMainWindow):
         header.setContentsMargins(0, 0, 0, 0)
         fav_card = QFrame()
         fav_card.setStyleSheet(
-            "QFrame#favCard { background:#F0F2F5; border-radius:6px; padding:6px 10px; } "
-            "QFrame#favCard:hover { background:#E5E6EB; } "
+            "QFrame#favCard { background:#F6F8FB; border:1px solid #E5EAF2; border-radius:9px; padding:6px 10px; } "
+            "QFrame#favCard:hover { background:#EEF3FA; border-color:#C7D5EA; } "
         )
         fav_card.setObjectName("favCard")
-        fav_shadow = QGraphicsDropShadowEffect()
-        fav_shadow.setBlurRadius(6)
-        fav_shadow.setXOffset(0)
-        fav_shadow.setYOffset(1)
-        fav_shadow.setColor(QColor(0, 0, 0, 20))
-        fav_card.setGraphicsEffect(fav_shadow)
+        # 去掉卡片阴影，避免某些缩放比例下出现右侧竖线伪影
+        fav_card.setGraphicsEffect(None)
         fav_layout = QHBoxLayout(fav_card)
-        fav_layout.setContentsMargins(10, 6, 12, 6)
-        fav_layout.setSpacing(4)
+        fav_layout.setContentsMargins(9, 6, 11, 6)
+        fav_layout.setSpacing(6)
         logo_lbl = QLabel()
         logo_lbl.setObjectName("pmHeaderLogo")
         _logo_sz = 24
@@ -2311,7 +3818,7 @@ class QtMainWindow(QMainWindow):
         title = QLabel("项目管理栏")
         title.setObjectName("favTitle")
         title.setStyleSheet(
-            "QLabel#favTitle{ font-family:'Microsoft YaHei'; font-size:14px; font-weight:500; color:#4E5969; background:transparent; } "
+            "QLabel#favTitle{ font-family:'Microsoft YaHei'; font-size:12px; font-weight:500; color:#3B4758; background:transparent; } "
             "QLabel#favTitle:hover{ color:#165DFF; } "
         )
         title.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -2320,10 +3827,12 @@ class QtMainWindow(QMainWindow):
         header.addWidget(fav_card)
         header.addStretch()
         add_btn = QPushButton("+ 添加项目")
-        add_btn.setFixedHeight(32)
+        add_btn.setFixedHeight(36)
         add_btn.setStyleSheet(
-            "QPushButton{background:#165DFF; color:white; border:none; border-radius:8px; font-size:12px; padding:8px 14px;} "
-            "QPushButton:hover{background:#4080FF;} QPushButton:pressed{background:#0E42D2;}"
+            "QPushButton{background:#165DFF; color:white; border:1px solid #165DFF; border-radius:9px; font-size:12px; font-weight:600; padding:10px 18px;} "
+            "QPushButton:hover{background:#3C7CFF; border-color:#3C7CFF;} "
+            "QPushButton:pressed{background:#0E42D2; border-color:#0E42D2;} "
+            "QPushButton:disabled{background:#AFC8FF; border-color:#AFC8FF; color:#EAF1FF;}"
         )
         add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
         shadow = QGraphicsDropShadowEffect()
@@ -2336,14 +3845,15 @@ class QtMainWindow(QMainWindow):
         header.addWidget(add_btn)
         fav_card.mousePressEvent = lambda e: self._on_left_pm_header_clicked()
         left_layout.addLayout(header)
+        left_layout.addSpacing(4)
 
         # 搜索栏 + 扁平下拉列表
         self.fav_search_edit = QLineEdit()
         self.fav_search_edit.setPlaceholderText("搜索项目")
         self.fav_search_edit.setClearButtonEnabled(True)
-        self.fav_search_edit.setFixedHeight(26)
+        self.fav_search_edit.setFixedHeight(28)
         self.fav_search_edit.setStyleSheet(
-            "QLineEdit{border:1px solid #D0D3D8; border-radius:4px; padding:2px 8px; font-size:11px;}"
+            "QLineEdit{border:1px solid #D0D3D8; border-radius:4px; padding:4px 10px; font-size:11px;}"
             "QLineEdit:focus{border-color:#165DFF;}"
         )
         left_layout.addWidget(self.fav_search_edit)
@@ -2398,22 +3908,30 @@ class QtMainWindow(QMainWindow):
 
         self.pm_tabs = QTabWidget()
         self.pm_tabs.setDocumentMode(True)
+        self.pm_tabs.tabBar().setCursor(Qt.CursorShape.PointingHandCursor)
         self.pm_tabs.setStyleSheet(
-            # 容器：浅灰底 + 白色内容卡片
             "QTabWidget{background:#F6F7FB;}"
-            "QTabWidget::pane{border:1px solid #E5E6EB; border-radius:12px; background:#FFFFFF; top:-1px;}"
-            "QTabBar{background:transparent;}"
-            # Tab：胶囊风格
-            "QTabBar::tab{min-width:120px; padding:8px 14px; margin:8px 6px 0 6px; "
-            "border:1px solid transparent; border-top-left-radius:10px; border-top-right-radius:10px; "
-            "color:#4E5969; background:transparent;}"
-            "QTabBar::tab:hover{color:#1F2329; background:rgba(22,93,255,0.08);}"
-            "QTabBar::tab:selected{color:#165DFF; background:#FFFFFF; border:1px solid #E5E6EB; border-bottom-color:#FFFFFF; font-weight:600;}"
-            # 下拉控件统一一点质感（只影响 tabs 内部，避免影响全局）
+            "QTabWidget::pane{"
+            "border:1px solid #E5E6EB; border-radius:12px; background:#FFFFFF;"
+            "top:0px; margin-top:2px;"
+            "}"
+            "QTabBar{background:transparent; qproperty-drawBase:0;}"
+            "QTabBar::tab{"
+            "min-width:128px; padding:10px 20px; margin:8px 5px 0 5px;"
+            "border:1px solid transparent; border-radius:10px 10px 0 0;"
+            "color:#86909C; background:transparent; font-size:13px; font-weight:500;"
+            "}"
+            "QTabBar::tab:hover{color:#1F2329; background:rgba(22,93,255,0.06); border-color:#E5E6EB;}"
+            "QTabBar::tab:selected{"
+            "color:#165DFF; background:#FFFFFF;"
+            "border:1px solid #E5E6EB; border-bottom:2px solid #165DFF;"
+            "font-size:13px; font-weight:700; padding-bottom:8px;"
+            "}"
             "QComboBox{border:1px solid #D0D3D8; border-radius:8px; padding:4px 10px; background:#FFFFFF;}"
             "QComboBox:focus{border-color:#165DFF;}"
         )
         self._build_todo_tab()
+        self._build_milestones_tab()
         self._build_analysis_tab()
         self._build_workbench_tab()
         self.pm_tabs.currentChanged.connect(self._on_pm_tab_changed)
@@ -2431,7 +3949,7 @@ class QtMainWindow(QMainWindow):
         self._pm_stack.setCurrentWidget(self.pm_tabs)
         pm_outer.addWidget(self._pm_stack)
 
-        self.tree = QTreeWidget()
+        self.tree = _FileBrowserTreeWidget()
         self.tree.setHeaderHidden(True)
         self.tree.setColumnCount(2)
         self.tree.setSelectionMode(QAbstractItemView.SelectionMode.ExtendedSelection)
@@ -2492,7 +4010,23 @@ class QtMainWindow(QMainWindow):
     def eventFilter(self, obj, event):
         if self._todo_product_drag_handle_event(obj, event):
             return True
+        if event.type() == QEvent.Type.Enter:
+            hint = obj.property("_pfn_status_hint")
+            if hint:
+                try:
+                    self.statusBar().showMessage(str(hint), 2000)
+                except Exception:
+                    pass
         if event.type() == QEvent.Type.MouseButtonDblClick and event.button() == Qt.MouseButton.LeftButton:
+            try:
+                self._pfn_todo_focus_tree_timer.stop()
+            except Exception:
+                pass
+            self._pfn_todo_focus_tree_pending_sk = ""
+            ptid = obj.property("_pfn_personal_task_id")
+            if ptid is not None and str(ptid).strip() != "":
+                self._open_personal_todo_task_editor(str(ptid))
+                return True
             sk = obj.property("_pfn_todo_sub_key")
             tid = obj.property("_pfn_todo_task_id")
             if sk is not None and str(sk).strip() != "" and tid is not None and str(tid).strip() != "":
@@ -2502,7 +4036,20 @@ class QtMainWindow(QMainWindow):
             sk = obj.property("_pfn_todo_sub_key")
             if sk is not None and str(sk).strip() != "":
                 if not isinstance(obj, QCheckBox):
-                    self._focus_tree_subproject(str(sk))
+                    sks = str(sk).strip().lower()
+                    t = getattr(self, "_pfn_todo_focus_tree_timer", None)
+                    if t is not None and t.isActive() and sks == str(
+                        getattr(self, "_pfn_todo_focus_tree_pending_sk", "") or ""
+                    ).strip().lower():
+                        t.stop()
+                        self._pfn_todo_focus_tree_pending_sk = ""
+                    else:
+                        if t is not None:
+                            t.stop()
+                        self._pfn_todo_focus_tree_pending_sk = sks
+                        ms = int(QApplication.styleHints().mouseDoubleClickInterval())
+                        if t is not None:
+                            t.start(max(200, ms + 40))
                 return False
         if obj is self.tree and event.type() == QEvent.Type.Resize:
             self._update_right_tree_columns()
@@ -2639,7 +4186,40 @@ class QtMainWindow(QMainWindow):
                 leaf.setIcon(0, icon_for_file_soft(fp, 14))
                 docs_root.addChild(leaf)
         return docs_root
-    
+
+    def _build_documentations_node_users(self, base):
+        """users 收藏：名称与图标与 projects 的 Documents 一致；列出项目根下 utility\\documentation 中的全部文件（非目录条目）。"""
+        doc_dir = os.path.normpath(os.path.join(base, "utility", "documentation")).replace("/", "\\")
+        root_item = QTreeWidgetItem(["Documents", ""])
+        root_item.setData(0, Qt.ItemDataRole.UserRole, None)
+        root_item.setData(1, Qt.ItemDataRole.UserRole, "documentations_root")
+        root_item.setIcon(0, icon_product_outlined(14))
+        if doc_dir:
+            root_item.setData(0, Qt.ItemDataRole.UserRole, doc_dir)
+        if not os.path.isdir(doc_dir):
+            return root_item
+        try:
+            names = sorted(os.listdir(doc_dir), key=lambda x: str(x).lower())
+        except Exception:
+            names = []
+        for n in names:
+            p = os.path.join(doc_dir, n)
+            try:
+                if not os.path.isfile(p):
+                    continue
+            except Exception:
+                continue
+            display = _strip_prefix(n)
+            mtime = _mtime_str(p)
+            leaf = QTreeWidgetItem([display, mtime])
+            leaf.setData(0, Qt.ItemDataRole.UserRole, p)
+            leaf.setData(1, Qt.ItemDataRole.UserRole, "file")
+            leaf.setTextAlignment(1, Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            leaf.setToolTip(0, p)
+            leaf.setIcon(0, icon_for_file_soft(p, 14))
+            root_item.addChild(leaf)
+        return root_item
+
     def _show_loading(self):
         self.loading.show()
     
@@ -2858,10 +4438,30 @@ class QtMainWindow(QMainWindow):
         lay.setContentsMargins(12, 10, 12, 12)
         lay.setSpacing(8)
 
-        todo_title = QLabel("我的待办")
-        todo_title.setStyleSheet("color:#1F2329;")
-        todo_title.setFont(_pfn_qfont_pt(12, True))
-        lay.addWidget(todo_title)
+        self.todo_inner_tabs = QTabWidget()
+        self.todo_inner_tabs.setDocumentMode(True)
+        self.todo_inner_tabs.tabBar().setCursor(Qt.CursorShape.PointingHandCursor)
+        self.todo_inner_tabs.setStyleSheet(
+            "QTabWidget{background:transparent;}"
+            "QTabWidget::pane{"
+            "border:1px solid #E5E6EB; background:#F7F8FA; border-radius:10px; top:0px; padding:2px;"
+            "}"
+            "QTabBar{background:transparent; qproperty-drawBase:0;}"
+            "QTabBar::tab{"
+            "padding:7px 16px; margin:6px 4px 0 4px; min-width:88px;"
+            "border:1px solid transparent; border-radius:8px;"
+            "color:#86909C; background:transparent; font-size:12px; font-weight:500;"
+            "}"
+            "QTabBar::tab:hover{color:#1F2329; background:rgba(22,93,255,0.06);}"
+            "QTabBar::tab:selected{"
+            "color:#165DFF; background:#FFFFFF;"
+            "border:1px solid #E5E6EB; font-weight:600;"
+            "}"
+        )
+        self.todo_inner_tabs.addTab(QWidget(), "项目待办")
+        self.todo_inner_tabs.addTab(QWidget(), "个人待办")
+        self.todo_inner_tabs.currentChanged.connect(self._on_todo_inner_tab_changed)
+        lay.addWidget(self.todo_inner_tabs)
 
         self.todo_filter_combo = QComboBox()
         self.todo_filter_combo.addItems(["显示全部", "仅显示未完成", "仅显示已完成"])
@@ -2871,6 +4471,20 @@ class QtMainWindow(QMainWindow):
         self.todo_filter_combo.setFont(_pfn_qfont_pt(8))
         self.todo_filter_combo.currentIndexChanged.connect(self._on_todo_filter_changed)
         lay.addWidget(self.todo_filter_combo)
+        self._todo_filter_state = {"project": 0, "personal": 0}
+        try:
+            v = self.core.config.get_todo_filters()
+            self._todo_filter_state["project"] = int(v.get("project", 0))
+            self._todo_filter_state["personal"] = int(v.get("personal", 0))
+        except Exception:
+            self._todo_filter_state = {"project": 0, "personal": 0}
+        for _k in ("project", "personal"):
+            if self._todo_filter_state.get(_k, 0) not in (0, 1, 2):
+                self._todo_filter_state[_k] = 0
+        try:
+            self.todo_filter_combo.setCurrentIndex(int(self._todo_filter_state.get("project", 0)))
+        except Exception:
+            self.todo_filter_combo.setCurrentIndex(0)
 
         self.todo_scroll = QScrollArea()
         self.todo_scroll.setWidgetResizable(True)
@@ -2902,7 +4516,27 @@ class QtMainWindow(QMainWindow):
         self._todo_insert_line.raise_()
 
         self.todo_scroll.setWidget(self.todo_cont)
-        lay.addWidget(self.todo_scroll, 1)
+        self.todo_inner_tabs.widget(0).setLayout(QVBoxLayout())
+        self.todo_inner_tabs.widget(0).layout().setContentsMargins(0, 8, 0, 0)
+        self.todo_inner_tabs.widget(0).layout().addWidget(self.todo_scroll, 1)
+
+        self.personal_todo_scroll = QScrollArea()
+        self.personal_todo_scroll.setWidgetResizable(True)
+        self.personal_todo_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.personal_todo_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.personal_todo_scroll.setMinimumHeight(200)
+        self.personal_todo_scroll.setStyleSheet(self.todo_scroll.styleSheet())
+        self.personal_todo_cont = QWidget()
+        self.personal_todo_cont.setStyleSheet("background:#F7F8FA;")
+        self.personal_todo_cont.setFont(_pfn_qfont_pt(8))
+        self.personal_todo_cont.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+        self.personal_todo_layout = QVBoxLayout(self.personal_todo_cont)
+        self.personal_todo_layout.setContentsMargins(2, 4, 4, 10)
+        self.personal_todo_layout.setSpacing(8)
+        self.personal_todo_scroll.setWidget(self.personal_todo_cont)
+        self.todo_inner_tabs.widget(1).setLayout(QVBoxLayout())
+        self.todo_inner_tabs.widget(1).layout().setContentsMargins(0, 8, 0, 0)
+        self.todo_inner_tabs.widget(1).layout().addWidget(self.personal_todo_scroll, 1)
 
         # 待办产品拖拽状态（自定义重排，不用 QDrag）
         self._todo_dnd_press_frame = None
@@ -2914,6 +4548,512 @@ class QtMainWindow(QMainWindow):
         self._todo_group_frames = {}
         self.pm_tabs.addTab(tab, "我的待办")
 
+    def _build_milestones_tab(self):
+        tab = QWidget()
+        lay = QVBoxLayout(tab)
+        lay.setContentsMargins(16, 12, 16, 16)
+        lay.setSpacing(12)
+
+        filter_bar = QFrame()
+        filter_bar.setObjectName("msFilterBar")
+        filter_bar.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        filter_bar.setStyleSheet(
+            "QFrame#msFilterBar{"
+            "background:qlineargradient(x1:0,y1:0,x2:0,y2:1, stop:0 #FFFFFF, stop:1 #F7F8FA);"
+            "border:1px solid #E5E6EB; border-radius:12px;"
+            "}"
+        )
+        ms_filter_shadow = QGraphicsDropShadowEffect()
+        ms_filter_shadow.setBlurRadius(8)
+        ms_filter_shadow.setXOffset(0)
+        ms_filter_shadow.setYOffset(2)
+        ms_filter_shadow.setColor(QColor(0, 0, 0, 12))
+        filter_bar.setGraphicsEffect(ms_filter_shadow)
+
+        top = QHBoxLayout(filter_bar)
+        top.setContentsMargins(14, 12, 14, 12)
+        top.setSpacing(10)
+
+        p_lbl = QLabel("产品：")
+        p_lbl.setFont(_pfn_qfont_pt(9))
+        p_lbl.setStyleSheet("color:#4E5969;")
+        top.addWidget(p_lbl)
+        self.ms_product_filter_combo = QComboBox()
+        self.ms_product_filter_combo.setFixedHeight(30)
+        self.ms_product_filter_combo.setMinimumWidth(160)
+        self.ms_product_filter_combo.setFont(_pfn_qfont_pt(9))
+        self.ms_product_filter_combo.addItem("全部")
+        self.ms_product_filter_combo.currentTextChanged.connect(self._on_ms_filter_changed)
+        top.addWidget(self.ms_product_filter_combo)
+
+        y_lbl = QLabel("年份：")
+        y_lbl.setFont(_pfn_qfont_pt(9))
+        y_lbl.setStyleSheet("color:#4E5969;")
+        top.addWidget(y_lbl)
+        self.ms_year_filter_combo = QComboBox()
+        self.ms_year_filter_combo.setFixedHeight(30)
+        self.ms_year_filter_combo.setMinimumWidth(90)
+        self.ms_year_filter_combo.setFont(_pfn_qfont_pt(9))
+        self.ms_year_filter_combo.currentTextChanged.connect(self._on_ms_filter_changed)
+        top.addWidget(self.ms_year_filter_combo)
+
+        m_lbl = QLabel("月份：")
+        m_lbl.setFont(_pfn_qfont_pt(9))
+        m_lbl.setStyleSheet("color:#4E5969;")
+        top.addWidget(m_lbl)
+        self.ms_month_filter_combo = QComboBox()
+        self.ms_month_filter_combo.setFixedHeight(30)
+        self.ms_month_filter_combo.setMinimumWidth(80)
+        self.ms_month_filter_combo.setFont(_pfn_qfont_pt(9))
+        self.ms_month_filter_combo.currentTextChanged.connect(self._on_ms_filter_changed)
+        top.addWidget(self.ms_month_filter_combo)
+
+        top.addStretch()
+        lay.addWidget(filter_bar)
+
+        self.ms_calendar_panel = QFrame()
+        self.ms_calendar_panel.setObjectName("msCalendarPanel")
+        self.ms_calendar_panel.setAttribute(Qt.WidgetAttribute.WA_StyledBackground, True)
+        self.ms_calendar_panel.setStyleSheet(
+            "QFrame#msCalendarPanel{"
+            "background:#F7F8FA; border:1px solid #E5E6EB; border-radius:12px;"
+            "}"
+        )
+        ms_panel_lay = QVBoxLayout(self.ms_calendar_panel)
+        ms_panel_lay.setContentsMargins(16, 14, 16, 14)
+        ms_panel_lay.setSpacing(0)
+
+        _ms_scroll_style = (
+            "QScrollArea{background:transparent; border:none;}"
+            "QScrollBar:vertical{width:10px; background:transparent; margin:4px 2px 4px 2px;}"
+            "QScrollBar::handle:vertical{background:rgba(0,0,0,0.14); border-radius:5px; min-height:26px;}"
+            "QScrollBar::handle:vertical:hover{background:rgba(0,0,0,0.22);}"
+            "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical{height:0px;}"
+            "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical{background:transparent;}"
+        )
+        self.ms_calendar_scroll = QScrollArea()
+        self.ms_calendar_scroll.setWidgetResizable(True)
+        self.ms_calendar_scroll.setFrameShape(QFrame.Shape.NoFrame)
+        self.ms_calendar_scroll.setHorizontalScrollBarPolicy(Qt.ScrollBarPolicy.ScrollBarAlwaysOff)
+        self.ms_calendar_scroll.setStyleSheet(_ms_scroll_style)
+
+        self.ms_calendar_content = QWidget()
+        self.ms_calendar_content.setStyleSheet("background:transparent;")
+        self.ms_calendar_layout = QVBoxLayout(self.ms_calendar_content)
+        self.ms_calendar_layout.setContentsMargins(0, 0, 2, 0)
+        self.ms_calendar_layout.setSpacing(6)
+        self.ms_calendar_scroll.setWidget(self.ms_calendar_content)
+        ms_panel_lay.addWidget(self.ms_calendar_scroll, 1)
+        lay.addWidget(self.ms_calendar_panel, 1)
+
+        now = datetime.now()
+        with QSignalBlocker(self.ms_year_filter_combo), QSignalBlocker(self.ms_month_filter_combo):
+            self.ms_year_filter_combo.clear()
+            self.ms_year_filter_combo.addItem(str(now.year))
+            self.ms_month_filter_combo.clear()
+            for m in range(1, 13):
+                self.ms_month_filter_combo.addItem(f"{m}月")
+            self.ms_month_filter_combo.setCurrentIndex(now.month - 1)
+
+        self.pm_tabs.addTab(tab, "项目节点")
+
+    def _on_ms_filter_changed(self, _t=None):
+        try:
+            self._rebuild_milestones_calendar_panel()
+        except Exception as e:
+            try:
+                print(f"[PFN] 关键时间节点筛选刷新失败: {e}", flush=True)
+            except Exception:
+                pass
+
+    def _ms_todo_hidden_sets(self):
+        hidden_prod = set()
+        hidden_sub = set()
+        try:
+            gp = getattr(self.core.config, "get_todo_hidden_products", None)
+            gs = getattr(self.core.config, "get_todo_hidden_subprojects", None)
+            if callable(gp):
+                _raw = gp()
+                if isinstance(_raw, set):
+                    hidden_prod = _raw
+                elif isinstance(_raw, (list, tuple, frozenset)):
+                    hidden_prod = set(_raw)
+            if callable(gs):
+                _raw = gs()
+                if isinstance(_raw, set):
+                    hidden_sub = _raw
+                elif isinstance(_raw, (list, tuple, frozenset)):
+                    hidden_sub = set(_raw)
+        except Exception:
+            pass
+        return hidden_prod, hidden_sub
+
+    def _collect_milestone_entries(self, pm=None):
+        pm = pm if isinstance(pm, dict) else self._project_management_data()
+        subs = pm.get("subprojects", {}) if isinstance(pm, dict) else {}
+        if not isinstance(subs, dict):
+            subs = {}
+        hidden_prod, hidden_sub = self._ms_todo_hidden_sets()
+        entries = []
+        products = set()
+        for sub_key, info in subs.items():
+            if not isinstance(info, dict):
+                continue
+            sk_low = str(sub_key or "").lower()
+            if sk_low in hidden_sub:
+                continue
+            sub_name = str(info.get("subproject_name", "") or "")
+            product_name = _pfn_derive_product_name(info, sub_name, sub_key)
+            if str(product_name or "").strip().lower() in hidden_prod:
+                continue
+            milestones = _pfn_normalize_milestones(info.get("milestones"))
+            if not milestones:
+                continue
+            products.add(product_name)
+            for m in milestones:
+                entries.append({
+                    "product": product_name,
+                    "sub_name": sub_name or sk_low,
+                    "sub_key": sk_low,
+                    "name": str(m.get("name", "") or ""),
+                    "date": str(m.get("date", "") or ""),
+                })
+        return entries, sorted(products, key=lambda x: x.lower())
+
+    def _refresh_ms_year_combo(self, entries):
+        years = {datetime.now().year}
+        for e in entries:
+            s = str(e.get("date", "") or "")
+            m = re.match(r"^(\d{4})", s)
+            if m:
+                try:
+                    years.add(int(m.group(1)))
+                except Exception:
+                    pass
+        years = sorted(years)
+        cur = str(self.ms_year_filter_combo.currentText() or "").strip()
+        with QSignalBlocker(self.ms_year_filter_combo):
+            self.ms_year_filter_combo.clear()
+            for y in years:
+                self.ms_year_filter_combo.addItem(str(y))
+            if cur in {str(y) for y in years}:
+                self.ms_year_filter_combo.setCurrentText(cur)
+            else:
+                self.ms_year_filter_combo.setCurrentText(str(datetime.now().year))
+
+    def _refresh_ms_product_combo(self, products):
+        cur = str(self.ms_product_filter_combo.currentText() or "全部").strip() or "全部"
+        with QSignalBlocker(self.ms_product_filter_combo):
+            self.ms_product_filter_combo.clear()
+            self.ms_product_filter_combo.addItem("全部")
+            for p in products:
+                self.ms_product_filter_combo.addItem(p)
+            names = {"全部"} | set(products)
+            self.ms_product_filter_combo.setCurrentText(cur if cur in names else "全部")
+
+    def _ms_selected_year_month(self):
+        try:
+            year = int(str(self.ms_year_filter_combo.currentText() or "").strip())
+        except Exception:
+            year = datetime.now().year
+        try:
+            month = int(str(self.ms_month_filter_combo.currentText() or "1月").replace("月", "").strip())
+        except Exception:
+            month = datetime.now().month
+        if month < 1 or month > 12:
+            month = datetime.now().month
+        return year, month
+
+    def _list_ms_addable_subprojects(self, product_filter=None):
+        """待办可见的全部子项目（用于添加节点）。"""
+        if product_filter is None:
+            product_filter = str(self.ms_product_filter_combo.currentText() or "全部").strip() or "全部"
+        pm = self._project_management_data()
+        subs = pm.get("subprojects", {}) if isinstance(pm, dict) else {}
+        if not isinstance(subs, dict):
+            subs = {}
+        hidden_prod, hidden_sub = self._ms_todo_hidden_sets()
+        options = []
+        for sub_key, info in subs.items():
+            if not isinstance(info, dict):
+                continue
+            sk_low = str(sub_key or "").lower()
+            if sk_low in hidden_sub:
+                continue
+            sub_name = str(info.get("subproject_name", "") or "")
+            product_name = _pfn_derive_product_name(info, sub_name, sub_key)
+            if str(product_name or "").strip().lower() in hidden_prod:
+                continue
+            if product_filter != "全部" and product_name != product_filter:
+                continue
+            label = f"{product_name} / {sub_name or sk_low}"
+            options.append((sk_low, label, sub_name or sk_low))
+        options.sort(key=lambda x: x[1].lower())
+        return options
+
+    def _edit_subproject_milestones(self, sub_key: str, sub_name: str = ""):
+        """打开子项目时间节点编辑器并同步待办/月视图。"""
+        sk = str(sub_key or "").strip().lower()
+        if not sk:
+            return
+        pm = self._project_management_data()
+        subs = pm.get("subprojects", {}) if isinstance(pm, dict) else {}
+        sub_info = subs.get(sk, {}) if isinstance(subs, dict) else {}
+        if not isinstance(sub_info, dict):
+            return
+        disp = str(sub_name or sub_info.get("subproject_name", "") or sk)
+        old_tasks = sub_info.get("tasks", []) or []
+        old_lines = [
+            str(t.get("content", "")).strip()
+            for t in old_tasks
+            if isinstance(t, dict) and str(t.get("content", "")).strip()
+        ]
+        ms = sub_info.get("milestones") if isinstance(sub_info, dict) else None
+        dlg = SubprojectTasksEditorDialog(
+            self,
+            f"编辑时间节点 — {disp}",
+            old_lines,
+            ms,
+            milestones_only=True,
+        )
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        self._apply_subproject_tasks_editor_result(sk, sub_info, dlg, disp)
+        self._refresh_todo_after_inline_edit()
+
+    def _merge_milestone_into_subproject(self, sub_key: str, ms_name: str, ms_date: str) -> bool:
+        sk = str(sub_key or "").strip().lower()
+        name = str(ms_name or "").strip()
+        date_s = str(ms_date or "").strip()
+        if not sk or not name or not date_s:
+            return False
+        pm = self._project_management_data()
+        subs = pm.get("subprojects", {}) if isinstance(pm, dict) else {}
+        info = subs.get(sk, {}) if isinstance(subs, dict) else {}
+        if not isinstance(info, dict):
+            return False
+        ms = dict(ConfigManager._normalize_milestones(info.get("milestones")))
+        if name in ms:
+            QMessageBox.warning(
+                self,
+                "添加节点",
+                f"节点「{name}」已存在，请更换名称或通过编辑时间节点修改。",
+            )
+            return False
+        ms[name] = date_s
+        setter = getattr(self.core.config, "upsert_subproject", None)
+        if not callable(setter) or not setter(sk, milestones=ms):
+            return False
+        self._refresh_todo_after_inline_edit()
+        return True
+
+    def _remove_milestone_from_subproject(self, sub_key: str, ms_name: str, sub_name: str = "") -> bool:
+        sk = str(sub_key or "").strip().lower()
+        name = str(ms_name or "").strip()
+        if not sk or not name:
+            return False
+        pm = self._project_management_data()
+        subs = pm.get("subprojects", {}) if isinstance(pm, dict) else {}
+        info = subs.get(sk, {}) if isinstance(subs, dict) else {}
+        if not isinstance(info, dict):
+            return False
+        ms = dict(ConfigManager._normalize_milestones(info.get("milestones")))
+        if name not in ms:
+            return False
+        date_s = str(ms.get(name, "") or "")
+        sub_display = str(sub_name or info.get("subproject_name", "") or sk)
+        product_name = _pfn_derive_product_name(info, sub_display, sk)
+        r = QMessageBox.question(
+            self,
+            "确认删除",
+            f"确定要删除以下节点吗？\n\n{product_name} / {sub_display}\n{name}：{date_s}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if r != QMessageBox.StandardButton.Yes:
+            return False
+        ms.pop(name, None)
+        setter = getattr(self.core.config, "upsert_subproject", None)
+        if not callable(setter) or not setter(sk, milestones=ms):
+            return False
+        self._refresh_todo_after_inline_edit()
+        try:
+            self.statusBar().showMessage(f"已删除节点：{name}", 2500)
+        except Exception:
+            pass
+        return True
+
+    def _on_ms_add_milestone_clicked(self, year: int, month: int, day: int = 0):
+        product_filter = str(self.ms_product_filter_combo.currentText() or "全部").strip() or "全部"
+        options = self._list_ms_addable_subprojects(product_filter)
+        if not options:
+            QMessageBox.information(self, "添加节点", "没有可添加节点的子项目。")
+            return
+        sub_opts = [(sk, label) for sk, label, _sn in options]
+        day_i = int(day or 0)
+        if day_i >= 1:
+            title = f"添加节点 — {year}年{month}月{day_i}日"
+        else:
+            title = f"添加节点 — {year}年{month}月"
+        dlg = MilestoneAddDialog(self, title, sub_opts, year, month, day_i)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        sk = dlg.get_sub_key()
+        name = dlg.get_milestone_name()
+        if not name:
+            QMessageBox.warning(self, "添加节点", "请输入或选择节点类型名称。")
+            return
+        date_s = dlg.get_date_str()
+        if not date_s:
+            QMessageBox.warning(self, "添加节点", "请填写日期。")
+            return
+        if self._merge_milestone_into_subproject(sk, name, date_s):
+            try:
+                self.statusBar().showMessage(f"已添加节点：{name}", 2500)
+            except Exception:
+                pass
+
+    def _on_ms_day_context_menu(self, row: QWidget, year: int, month: int, day: int, pos: QPoint):
+        menu = QMenu(self)
+        act_add = menu.addAction("添加节点…")
+        _style_pfn_context_menu(menu)
+        act = menu.exec(row.mapToGlobal(pos))
+        if act == act_add:
+            QTimer.singleShot(0, lambda y=year, m=month, d=day: self._on_ms_add_milestone_clicked(y, m, d))
+
+    @staticmethod
+    def _ms_clear_layout(layout):
+        if layout is None:
+            return
+        while layout.count():
+            item = layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+            else:
+                sub = item.layout()
+                if sub is not None:
+                    QtMainWindow._ms_clear_layout(sub)
+
+    def _rebuild_milestones_calendar_panel(self, pm=None):
+        if getattr(self, "ms_calendar_layout", None) is None:
+            return
+        entries, products = self._collect_milestone_entries(pm)
+        self._refresh_ms_product_combo(products)
+        self._refresh_ms_year_combo(entries)
+        year, month = self._ms_selected_year_month()
+        product_filter = str(self.ms_product_filter_combo.currentText() or "全部").strip() or "全部"
+        if product_filter != "全部":
+            entries = [e for e in entries if e.get("product") == product_filter]
+
+        days_in_month = calendar.monthrange(year, month)[1]
+        by_day = {d: [] for d in range(1, days_in_month + 1)}
+        fuzzy_items = []
+
+        for e in entries:
+            kind, day = _classify_milestone_date(e.get("date", ""), year, month)
+            if kind == "exact_day" and day:
+                by_day.setdefault(day, []).append(e)
+            elif kind == "fuzzy_in_month":
+                fuzzy_items.append(e)
+
+        for d in by_day:
+            by_day[d].sort(key=lambda x: (x.get("product", "").lower(), x.get("sub_name", "").lower(), x.get("name", "").lower()))
+        fuzzy_items.sort(key=lambda x: (x.get("product", "").lower(), x.get("sub_name", "").lower(), x.get("name", "").lower()))
+
+        self._ms_clear_layout(self.ms_calendar_layout)
+
+        title = QLabel(f"{year}年{month}月 · 项目关键时间节点")
+        title.setFont(_pfn_qfont_pt(11, True))
+        title.setStyleSheet("color:#1F2329; padding:0 4px 12px 4px; background:transparent;")
+        self.ms_calendar_layout.addWidget(title)
+
+        for day in range(1, days_in_month + 1):
+            try:
+                wd = _WEEKDAY_CN[datetime(year, month, day).weekday()]
+            except Exception:
+                wd = ""
+            day_entries = by_day.get(day) or []
+            has_nodes = bool(day_entries)
+            row = QFrame()
+            if has_nodes:
+                row.setStyleSheet(
+                    "QFrame{background:#FFFFFF; border:1px solid #EDEFF2; border-radius:10px;}"
+                )
+                row_pad = (12, 8, 12, 8)
+                date_color = "#4E5969"
+            else:
+                row.setStyleSheet("QFrame{background:transparent; border:none;}")
+                row_pad = (12, 2, 12, 2)
+                date_color = "#C9CDD4"
+            row_h = QHBoxLayout(row)
+            row_h.setContentsMargins(*row_pad)
+            row_h.setSpacing(16)
+            row.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            row.customContextMenuRequested.connect(
+                partial(self._on_ms_day_context_menu, row, year, month, day)
+            )
+
+            date_lbl = QLabel(f"{month}月{day}日\n{wd}")
+            date_lbl.setFont(_pfn_qfont_pt(9, True))
+            date_lbl.setStyleSheet(f"color:{date_color}; background:transparent; border:none;")
+            date_lbl.setFixedWidth(76)
+            date_lbl.setAlignment(Qt.AlignmentFlag.AlignTop | Qt.AlignmentFlag.AlignHCenter)
+            row_h.addWidget(date_lbl, 0)
+
+            chips_col = QVBoxLayout()
+            chips_col.setContentsMargins(0, 0, 0, 0)
+            chips_col.setSpacing(6)
+            for e in day_entries:
+                chips_col.addWidget(
+                    _ms_node_chip(
+                        e["product"],
+                        e["sub_name"],
+                        e["name"],
+                        e["date"],
+                        e["sub_key"],
+                        on_edit=self._edit_subproject_milestones,
+                        on_delete=self._remove_milestone_from_subproject,
+                    )
+                )
+            chips_w = QWidget()
+            chips_w.setStyleSheet("background:transparent; border:none;")
+            chips_w.setLayout(chips_col)
+            row_h.addWidget(chips_w, 1)
+            self.ms_calendar_layout.addWidget(row)
+
+        fuzzy_frame = QFrame()
+        fuzzy_frame.setStyleSheet(
+            "QFrame{background:#FFFFFF; border:1px solid #EDEFF2; border-radius:10px;}"
+        )
+        fuzzy_frame.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+        fuzzy_frame.customContextMenuRequested.connect(
+            partial(self._on_ms_day_context_menu, fuzzy_frame, year, month, 0)
+        )
+        fuzzy_v = QVBoxLayout(fuzzy_frame)
+        fuzzy_v.setContentsMargins(12, 10, 12, 10)
+        fuzzy_v.setSpacing(6)
+        fuzzy_title = QLabel("本月未指定日期")
+        fuzzy_title.setFont(_pfn_qfont_pt(10, True))
+        fuzzy_title.setStyleSheet("color:#1F2329;")
+        fuzzy_v.addWidget(fuzzy_title)
+        if fuzzy_items:
+            for e in fuzzy_items:
+                fuzzy_v.addWidget(
+                    _ms_node_chip(
+                        e["product"],
+                        e["sub_name"],
+                        e["name"],
+                        e["date"],
+                        e["sub_key"],
+                        on_edit=self._edit_subproject_milestones,
+                        on_delete=self._remove_milestone_from_subproject,
+                    )
+                )
+        self.ms_calendar_layout.addWidget(fuzzy_frame)
+        self.ms_calendar_layout.addStretch(1)
+
     def _on_todo_filter_changed(self, _i: int):
         try:
             name = str(self.todo_filter_combo.currentText() or "")
@@ -2921,6 +5061,33 @@ class QtMainWindow(QMainWindow):
             print(f"[Filter Changed] 当前筛选: {name}", flush=True)
         except Exception:
             pass
+        tab_key = "personal" if self._is_personal_todo_active() else "project"
+        try:
+            idx = int(self.todo_filter_combo.currentIndex())
+        except Exception:
+            idx = 0
+        if idx < 0 or idx > 2:
+            idx = 0
+        self._todo_filter_state[tab_key] = idx
+        try:
+            saver = getattr(self.core.config, "save_todo_filter", None)
+            if callable(saver):
+                saver(tab_key, idx)
+        except Exception:
+            pass
+        self._rebuild_todo_panel()
+
+    def _on_todo_inner_tab_changed(self, _i: int):
+        tab_key = "personal" if self._is_personal_todo_active() else "project"
+        idx = int(self._todo_filter_state.get(tab_key, 0))
+        if idx < 0 or idx > 2:
+            idx = 0
+        try:
+            b = QSignalBlocker(self.todo_filter_combo)
+            self.todo_filter_combo.setCurrentIndex(idx)
+            del b
+        except Exception:
+            self.todo_filter_combo.setCurrentIndex(idx)
         self._rebuild_todo_panel()
 
     def _on_todo_product_order_changed(self, order_list):
@@ -2963,10 +5130,16 @@ class QtMainWindow(QMainWindow):
                 out.append(w)
         return out
 
-    def _todo_register_product_drag_targets(self, prod_frame: QFrame):
+    @staticmethod
+    def _todo_is_drag_handle(w) -> bool:
+        if not isinstance(w, QWidget):
+            return False
+        return bool(w.property("_pfn_todo_drag_handle"))
+
+    def _todo_register_product_drag_targets(self, prod_title_btn):
         try:
-            for ww in [prod_frame] + prod_frame.findChildren(QWidget):
-                ww.installEventFilter(self)
+            if prod_title_btn is not None:
+                prod_title_btn.setProperty("_pfn_todo_drag_handle", True)
         except Exception:
             pass
 
@@ -3138,10 +5311,14 @@ class QtMainWindow(QMainWindow):
         if not self._todo_dnd_dragging and self._todo_dnd_press_frame is None:
             if not isinstance(obj, QWidget):
                 return False
+            if not self._todo_is_drag_handle(obj):
+                return False
             if self._todo_drag_product_frame(obj) is None:
                 return False
         if et == QEvent.Type.MouseButtonPress and event.button() == Qt.MouseButton.LeftButton:
             if not isinstance(obj, QWidget):
+                return False
+            if not self._todo_is_drag_handle(obj):
                 return False
             if self._todo_drag_skip_widget(obj):
                 return False
@@ -3595,6 +5772,14 @@ class QtMainWindow(QMainWindow):
                     print(f"[PFN] 待办标签页重建失败: {e}", flush=True)
                 except Exception:
                     pass
+        elif idx == 1:
+            try:
+                self._rebuild_milestones_calendar_panel()
+            except Exception as e:
+                try:
+                    print(f"[PFN] 关键时间节点标签页重建失败: {e}", flush=True)
+                except Exception:
+                    pass
 
     def _normalize_task_status(self, task) -> str:
         """统一任务完成状态，兼容历史或异常值。"""
@@ -3620,6 +5805,8 @@ class QtMainWindow(QMainWindow):
                 "created_at": datetime.now().strftime("%Y-%m-%d %H:%M:%S"),
                 "status": "未完成",
                 "completed_at": "",
+                "due_date": "",
+                "attachments": [],
             }
         if not isinstance(t, dict):
             return None
@@ -3635,6 +5822,18 @@ class QtMainWindow(QMainWindow):
             out["priority"] = "中"
         st = self._normalize_task_status(out)
         out["status"] = "已完成" if st == "已完成" else "未完成"
+        due = str(out.get("due_date", "") or "").strip()
+        if due and not re.match(r"^\d{4}-\d{2}-\d{2}$", due):
+            due = ""
+        out["due_date"] = due
+        att_raw = out.get("attachments")
+        out["attachments"] = list(
+            ConfigManager._normalize_project_task_attachments_list(
+                att_raw if isinstance(att_raw, list) else [],
+                str(sub_key or "").strip().lower(),
+                str(out.get("id", "") or ""),
+            )
+        )
         return out
 
     def _todo_effective_priority(self, task: dict, info: dict) -> str:
@@ -3698,6 +5897,149 @@ class QtMainWindow(QMainWindow):
                 w.setParent(None)
                 w.deleteLater()
 
+    def _clear_personal_todo_layout(self):
+        if getattr(self, "personal_todo_layout", None) is None:
+            return
+        while self.personal_todo_layout.count():
+            item = self.personal_todo_layout.takeAt(0)
+            w = item.widget()
+            if w is not None:
+                w.setParent(None)
+                w.deleteLater()
+
+    def _refresh_todo_collapsible_layout(self, content_widget: QWidget):
+        """折叠/展开动画结束后刷新外层布局，避免卡片留白或高度错位。"""
+        def _do():
+            try:
+                w = content_widget
+                for _ in range(3):
+                    if w is None:
+                        break
+                    if w.layout():
+                        w.layout().activate()
+                    w.adjustSize()
+                    w = w.parentWidget()
+                if getattr(self, "todo_cont", None) is not None:
+                    self.todo_cont.adjustSize()
+                sc = getattr(self, "todo_scroll", None)
+                if sc is not None:
+                    sc.updateGeometry()
+            except Exception:
+                pass
+        QTimer.singleShot(0, _do)
+
+    def _todo_measure_collapsible_height(self, content_widget: QWidget) -> int:
+        try:
+            if content_widget.layout():
+                content_widget.layout().activate()
+            content_widget.adjustSize()
+            h = int(content_widget.height())
+            if h > 0:
+                return h
+            return max(0, int(content_widget.sizeHint().height()))
+        except Exception:
+            return 0
+
+    def _todo_click_is_double(self, key: str) -> bool:
+        """第二次短间隔点击视为双击的一部分，不再触发折叠（避免弹回）。"""
+        store = getattr(self, "_todo_click_ts", None)
+        if not isinstance(store, dict):
+            self._todo_click_ts = {}
+            store = self._todo_click_ts
+        now = time.monotonic()
+        k = str(key or "")
+        interval = QApplication.styleHints().mouseDoubleClickInterval() / 1000.0
+        last = float(store.get(k, 0.0) or 0.0)
+        if last > 0 and now - last < interval:
+            store[k] = 0.0
+            return True
+        store[k] = now
+        return False
+
+    def _animate_todo_collapsible(self, content_widget: QWidget, target_expand: bool):
+        if content_widget is None:
+            return
+        prev = getattr(content_widget, "_pfn_anim", None)
+        if prev is not None:
+            try:
+                if prev.state() == QPropertyAnimation.State.Running:
+                    prev.stop()
+            except Exception:
+                pass
+            try:
+                prev.finished.disconnect()
+            except Exception:
+                pass
+
+        is_sub_body = bool(content_widget.property("_pfn_todo_sub_body"))
+        if not target_expand:
+            prev = getattr(content_widget, "_pfn_anim", None)
+            if prev is not None:
+                try:
+                    if prev.state() == QPropertyAnimation.State.Running:
+                        prev.stop()
+                except Exception:
+                    pass
+            if is_sub_body:
+                self._apply_todo_sub_body_collapsed_ui(content_widget, False)
+            else:
+                try:
+                    content_widget.setVisible(False)
+                    content_widget.setMaximumHeight(0)
+                    content_widget.setMinimumHeight(0)
+                except Exception:
+                    pass
+            self._refresh_todo_collapsible_layout(content_widget)
+            return
+
+        if target_expand:
+            try:
+                content_widget.setVisible(True)
+                if is_sub_body:
+                    content_widget.setSizePolicy(
+                        QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
+                    )
+                    content_widget.setMinimumHeight(0)
+                content_widget.setMaximumHeight(0)
+                if content_widget.layout():
+                    content_widget.layout().activate()
+            except Exception:
+                pass
+            start_h = 0
+            end_h = self._todo_measure_collapsible_height(content_widget)
+            if end_h <= 0:
+                end_h = 1
+
+        anim = QPropertyAnimation(content_widget, b"maximumHeight", self)
+        anim.setDuration(180)
+        anim.setEasingCurve(QEasingCurve.Type.OutCubic)
+        anim.setStartValue(start_h)
+        anim.setEndValue(end_h)
+
+        def _on_finished():
+            try:
+                content_widget.setVisible(True)
+                if is_sub_body:
+                    content_widget.setSizePolicy(
+                        QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum
+                    )
+                    content_widget.setMinimumHeight(0)
+                    content_widget.setMaximumHeight(16777215)
+                else:
+                    content_widget.setMaximumHeight(16777215)
+            except Exception:
+                pass
+            self._refresh_todo_collapsible_layout(content_widget)
+
+        anim.finished.connect(_on_finished)
+        content_widget._pfn_anim = anim
+        anim.start()
+
+    def _on_prod_title_toggle_click(self, product_name: str, content_widget: QWidget):
+        if self._todo_click_is_double(f"prod:{product_name}"):
+            return
+        self._toggle_todo_product(product_name, content_widget)
+
     def _toggle_todo_product(self, product_name: str, content_widget: QWidget):
         """点击产品标题：展开/收起该产品下的子项目与任务（带高度动画）。"""
         name = str(product_name or "").strip()
@@ -3714,64 +6056,204 @@ class QtMainWindow(QMainWindow):
                 saver(self._todo_product_expanded)
         except Exception:
             pass
+        self._animate_todo_collapsible(content_widget, target_expand)
 
+    def _toggle_todo_subproject(self, sub_key: str, content_widget: QWidget):
+        """点击子项目标题：展开/收起「+ 添加任务」与任务列表（带高度动画）。"""
+        sk = str(sub_key or "").strip().lower()
+        if not sk or content_widget is None:
+            return
+        if not hasattr(self, "_todo_subproject_expanded") or not isinstance(getattr(self, "_todo_subproject_expanded", None), dict):
+            self._todo_subproject_expanded = {}
+        expanded = bool(self._todo_subproject_expanded.get(sk, True))
+        target_expand = not expanded
+        self._todo_subproject_expanded[sk] = target_expand
         try:
-            content_widget.setVisible(True)
-            content_widget.layout().activate() if content_widget.layout() else None
+            saver = getattr(self.core.config, "save_todo_subproject_expanded_snapshot", None)
+            if callable(saver):
+                saver(self._todo_subproject_expanded)
         except Exception:
             pass
+        self._animate_todo_collapsible(content_widget, target_expand)
 
-        start_h = content_widget.maximumHeight()
-        if start_h <= 0:
-            try:
-                start_h = max(0, int(content_widget.sizeHint().height()))
-            except Exception:
-                start_h = 0
-        end_h = 0
-        if target_expand:
-            try:
-                end_h = max(0, int(content_widget.sizeHint().height()))
-            except Exception:
-                end_h = 0
-            if end_h <= 0:
-                end_h = 1
+    def _apply_todo_sub_body_collapsed_ui(self, sub_body: QWidget, expanded: bool):
+        """子项目内容区折叠/展开的静态布局（重建列表时与动画结束时共用）。"""
+        if sub_body is None:
+            return
+        sub_body.setProperty("_pfn_todo_sub_body", True)
+        if expanded:
+            sub_body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+            sub_body.setMinimumHeight(0)
+            sub_body.setMaximumHeight(16777215)
+            sub_body.setVisible(True)
+        else:
+            sub_body.setVisible(False)
+            sub_body.setMaximumHeight(0)
+            sub_body.setMinimumHeight(0)
+            sub_body.setFixedHeight(0)
 
-        anim = QPropertyAnimation(content_widget, b"maximumHeight", self)
-        anim.setDuration(260)
-        anim.setStartValue(start_h)
-        anim.setEndValue(end_h)
+    def _is_personal_todo_active(self) -> bool:
+        tabs = getattr(self, "todo_inner_tabs", None)
+        if tabs is None:
+            return False
+        return int(tabs.currentIndex()) == 1
 
-        def _on_finished():
-            try:
-                if not target_expand:
-                    content_widget.setVisible(False)
-                    content_widget.setMaximumHeight(0)
-                else:
-                    content_widget.setVisible(True)
-                    content_widget.setMaximumHeight(16777215)
-            except Exception:
-                pass
-            # 展开/收起后刷新卡片高度（垂直布局下由 sizeHint 自然收缩）
-            try:
-                prod_frame = content_widget.parentWidget()
-                if prod_frame is not None and prod_frame.layout():
-                    prod_frame.layout().activate()
-                    prod_frame.adjustSize()
-                if getattr(self, "todo_cont", None) is not None:
-                    self.todo_cont.adjustSize()
-                sc = getattr(self, "todo_scroll", None)
-                if sc is not None:
-                    sc.updateGeometry()
-            except Exception:
-                pass
+    def _rebuild_personal_todo_panel(self):
+        if getattr(self, "personal_todo_layout", None) is None:
+            return
+        self._clear_personal_todo_layout()
+        filter_index = 0
+        if getattr(self, "todo_filter_combo", None) is not None:
+            filter_index = int(self.todo_filter_combo.currentIndex())
+            if filter_index < 0 or filter_index > 2:
+                filter_index = 0
 
-        anim.finished.connect(_on_finished)
-        # 防止被 GC
-        content_widget._pfn_anim = anim
-        anim.start()
+        getter = getattr(self.core.config, "get_personal_tasks", None)
+        tasks = getter() if callable(getter) else []
+        if not isinstance(tasks, list):
+            tasks = []
+
+        today_s = datetime.now().strftime("%Y-%m-%d")
+        priority_rank = {"高": 0, "中": 1, "低": 2}
+        rows = []
+        for t in tasks:
+            if not isinstance(t, dict):
+                continue
+            st = self._normalize_task_status(t)
+            if filter_index == 1 and st == "已完成":
+                continue
+            if filter_index == 2 and st != "已完成":
+                continue
+            pri = str(t.get("priority", "中") or "中")
+            if pri not in ("高", "中", "低"):
+                pri = "中"
+            due = str(t.get("due_date", "") or "").strip()
+            overdue = bool(due and due < today_s and st != "已完成")
+            rows.append((1 if st == "已完成" else 0, priority_rank.get(pri, 1), str(t.get("created_at", "")), overdue, t))
+        rows.sort(key=lambda x: (x[0], x[1], x[2]))
+
+        add_btn = QPushButton("+ 添加任务")
+        add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
+        add_btn.setStyleSheet(
+            "QPushButton{border:none;color:#165DFF;background:transparent;text-align:left;padding:4px 2px 6px 2px;font-size:10px;}"
+            "QPushButton:hover{color:#0E42D2;text-decoration:underline;}"
+        )
+        add_btn.clicked.connect(self._on_personal_todo_add_clicked)
+        self.personal_todo_layout.addWidget(add_btn)
+
+        chk_style = (
+            "QCheckBox { spacing: 5px; background: transparent; color: #1F2329; }"
+            "QCheckBox::indicator { width: 10px; height: 10px; border-radius: 5px; border: 1px solid rgba(31,35,41,130); background: rgba(255,255,255,200); }"
+            "QCheckBox::indicator:unchecked { border-radius: 5px; border: 1px solid rgba(31,35,41,130); background: rgba(255,255,255,200); image: none; }"
+            "QCheckBox::indicator:checked { border-radius: 5px; border: 1px solid rgba(31,35,41,160); background: rgba(31,35,41,170); image: none; }"
+        )
+
+        if not rows:
+            hint = QLabel("暂无个人待办，点击 + 添加任务")
+            hint.setAlignment(Qt.AlignmentFlag.AlignCenter)
+            hint.setWordWrap(True)
+            hint.setMinimumHeight(120)
+            hint.setStyleSheet("color:#86909C; padding:24px;")
+            hint.setFont(_pfn_qfont_pt(10))
+            self.personal_todo_layout.addWidget(hint)
+            self.personal_todo_layout.addStretch(1)
+            return
+
+        for _done_key, _pr, _ct, overdue, task in rows:
+            task_id = str(task.get("id", "") or "")
+            content = str(task.get("content", "") or "").strip() or "（无内容）"
+            created = str(task.get("created_at", "") or "")
+            pri = str(task.get("priority", "中") or "中")
+            due = str(task.get("due_date", "") or "").strip()
+            is_done = self._normalize_task_status(task) == "已完成"
+            due_level = _todo_due_highlight(due, is_done, today_s)
+
+            row_w = QFrame()
+            if is_done:
+                row_w.setStyleSheet(
+                    "QFrame{background:#F2F3F5; border:none; border-radius:10px;}"
+                )
+            elif due_level == "overdue":
+                row_w.setStyleSheet(
+                    "QFrame{background:#FFF2F0; border:none; border-radius:10px;}"
+                )
+            elif due_level == "due_today":
+                row_w.setStyleSheet(
+                    "QFrame{background:#FFF7E8; border:none; border-radius:10px;}"
+                )
+            elif due_level == "due_soon":
+                row_w.setStyleSheet(
+                    "QFrame{background:#FFFBF0; border:none; border-radius:10px;}"
+                )
+            else:
+                row_w.setStyleSheet(
+                    "QFrame{background:#FFFFFF; border:none; border-radius:10px;}"
+                )
+            row_w.setMinimumHeight(58)
+            row_h = QHBoxLayout(row_w)
+            row_h.setContentsMargins(14, 8, 10, 8)
+            row_h.setSpacing(6)
+
+            chk = QCheckBox()
+            chk.setStyleSheet(chk_style)
+            chk.setCursor(Qt.CursorShape.PointingHandCursor)
+            chk.blockSignals(True)
+            chk.setChecked(is_done)
+            chk.blockSignals(False)
+            chk.toggled.connect(partial(self._on_personal_todo_checkbox_toggled, task_id))
+
+            text_col = QWidget()
+            text_col.setStyleSheet("background:transparent; border:none;")
+            text_col.setProperty("_pfn_personal_task_id", task_id)
+            text_col.installEventFilter(self)
+            tv = QVBoxLayout(text_col)
+            tv.setContentsMargins(0, 0, 0, 0)
+            tv.setSpacing(5)
+
+            body = QLabel(content)
+            body.setWordWrap(True)
+            body.setFont(_pfn_qfont_pt(10))
+            body.setStyleSheet(_todo_task_body_style(due_level, is_done, with_border_none=True))
+            body.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+
+            meta_parts = [f"创建：{created}", f"优先级：{pri}"]
+            if due:
+                meta_parts.append(f"截止：{due}")
+            atts = task.get("attachments") if isinstance(task, dict) else None
+            n_att = len(atts) if isinstance(atts, list) else 0
+            meta_text = "  ·  ".join(meta_parts)
+
+            meta_row = QWidget()
+            meta_row.setStyleSheet("background:transparent; border:none;")
+            meta_row.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            m_h = QHBoxLayout(meta_row)
+            m_h.setContentsMargins(0, 0, 0, 0)
+            m_h.setSpacing(8)
+            meta = QLabel(meta_text)
+            meta.setStyleSheet(_todo_task_meta_style(due_level, is_done))
+            meta.setFont(_pfn_qfont_pt(9))
+            meta.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+            m_h.addWidget(meta, 1, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+            badge = _pfn_personal_todo_attach_badge(n_att, is_done, due_level)
+            if badge is not None:
+                m_h.addWidget(badge, 0, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
+            tv.addWidget(body)
+            tv.addWidget(meta_row)
+
+            row_h.addWidget(chk, 0, Qt.AlignmentFlag.AlignTop)
+            row_h.addWidget(text_col, 1)
+            row_w.setProperty("_pfn_personal_task_id", task_id)
+            row_w.installEventFilter(self)
+            row_w.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            row_w.customContextMenuRequested.connect(partial(self._on_personal_todo_row_context_menu, row_w, task_id))
+            self.personal_todo_layout.addWidget(row_w)
+        self.personal_todo_layout.addStretch(1)
 
     def _rebuild_todo_panel(self):
         """根据筛选重建「我的待办」列表（产品-项目-任务三级：产品卡片 -> 子项目分组 -> 任务行）。"""
+        if self._is_personal_todo_active():
+            self._rebuild_personal_todo_panel()
+            return
         if getattr(self, "todo_layout", None) is None:
             return
         self._todo_reset_product_drag_ui()
@@ -3802,6 +6284,8 @@ class QtMainWindow(QMainWindow):
         self._todo_group_frames = {}
         if not hasattr(self, "_todo_product_expanded") or not isinstance(getattr(self, "_todo_product_expanded", None), dict):
             self._todo_product_expanded = {}
+        if not hasattr(self, "_todo_subproject_expanded") or not isinstance(getattr(self, "_todo_subproject_expanded", None), dict):
+            self._todo_subproject_expanded = {}
 
         pm = self._project_management_data()
         subs = pm.get("subprojects", {}) if isinstance(pm, dict) else {}
@@ -3820,6 +6304,26 @@ class QtMainWindow(QMainWindow):
 
         priority_rank = {"高": 0, "中": 1, "低": 2}
 
+        hidden_prod = set()
+        hidden_sub = set()
+        try:
+            gp = getattr(self.core.config, "get_todo_hidden_products", None)
+            gs = getattr(self.core.config, "get_todo_hidden_subprojects", None)
+            if callable(gp):
+                _raw = gp()
+                if isinstance(_raw, set):
+                    hidden_prod = _raw
+                elif isinstance(_raw, (list, tuple, frozenset)):
+                    hidden_prod = set(_raw)
+            if callable(gs):
+                _raw = gs()
+                if isinstance(_raw, set):
+                    hidden_sub = _raw
+                elif isinstance(_raw, (list, tuple, frozenset)):
+                    hidden_sub = set(_raw)
+        except Exception:
+            pass
+
         # 每个子项目都展示（便于「+ 添加任务」）；任务行按筛选显示
         products = {}
         for sub_key, info in subs.items():
@@ -3827,7 +6331,11 @@ class QtMainWindow(QMainWindow):
                 continue
             sub_name = str(info.get("subproject_name", "") or "")
             sk_low = str(sub_key or "").lower()
+            if sk_low in hidden_sub:
+                continue
             product_name = _pfn_derive_product_name(info, sub_name, sub_key)
+            if str(product_name or "").strip().lower() in hidden_prod:
+                continue
             prod = products.setdefault(product_name, {})
             bucket = {
                 "sub_name": sub_name,
@@ -3919,6 +6427,8 @@ class QtMainWindow(QMainWindow):
             empty.setFont(_pfn_qfont_pt(10))
             self.todo_layout.addWidget(empty)
 
+        today_s = datetime.now().strftime("%Y-%m-%d")
+
         # 三层展示：产品卡片 -> 子项目分组 -> 任务（无任务或未通过筛选的子项目不显示）
         # 产品顺序：优先使用 config.json.product_order；其余按字母追加
         try:
@@ -3975,6 +6485,16 @@ class QtMainWindow(QMainWindow):
                 "QPushButton:hover{background:rgba(22,93,255,0.06);}"
                 "QPushButton:pressed{background:rgba(22,93,255,0.10);}"
             )
+            pname_early = str(prod_name or "").strip() or "（未命名产品）"
+            prod_title_btn.setProperty(
+                "_pfn_status_hint", "点击折叠/展开 · 右键从待办移除产品"
+            )
+            prod_title_btn.setProperty("_pfn_todo_drag_handle", True)
+            prod_title_btn.installEventFilter(self)
+            prod_title_btn.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+            prod_title_btn.customContextMenuRequested.connect(
+                partial(self._on_todo_product_header_context, pname_early)
+            )
             pv.addWidget(prod_title_btn)
 
             # 产品内容区（子项目 + 任务）：用于折叠/展开动画
@@ -4000,34 +6520,13 @@ class QtMainWindow(QMainWindow):
                 sv.setContentsMargins(8, 8, 8, 8)
                 sv.setSpacing(6)
 
-                head_row = QWidget()
-                head_row.setStyleSheet("background:transparent;")
-                head_h = QHBoxLayout(head_row)
-                head_h.setContentsMargins(0, 0, 0, 0)
-                head_h.setSpacing(6)
-                st_lbl = QLabel(sub_name or "（未命名项目）")
-                st_lbl.setStyleSheet("color:#1F2329;")
-                st_lbl.setFont(_pfn_qfont_pt(9, True))
-                st_lbl.setToolTip("右键 → 编辑时间节点")
-                head_h.addWidget(st_lbl, 0)
-                for m in _pfn_normalize_milestones(info_b.get("milestones")):
-                    try:
-                        chip = QLabel(f"[{m['name']}：{m['date']}]")
-                        chip.setStyleSheet(
-                            "color:#86909C; background:#E8EAED; padding:1px 6px; border-radius:5px;"
-                        )
-                        chip.setFont(_pfn_qfont_pt(7))
-                        chip.setToolTip("")
-                        chip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
-                        head_h.addWidget(chip, 0)
-                    except Exception:
-                        continue
-                head_h.addStretch(1)
-                head_row.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
-                head_row.customContextMenuRequested.connect(
-                    partial(self._on_todo_subproject_header_context, sk_l, sub_name)
-                )
-                sv.addWidget(head_row)
+                sub_body = QWidget()
+                sub_body.setProperty("_pfn_todo_sub_body", True)
+                sub_body.setStyleSheet("background:transparent;")
+                sub_body.setSizePolicy(QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Minimum)
+                sub_v = QVBoxLayout(sub_body)
+                sub_v.setContentsMargins(0, 0, 0, 0)
+                sub_v.setSpacing(6)
 
                 add_btn = QPushButton("+ 添加任务")
                 add_btn.setCursor(Qt.CursorShape.PointingHandCursor)
@@ -4036,14 +6535,16 @@ class QtMainWindow(QMainWindow):
                     "QPushButton:hover{color:#0E42D2;text-decoration:underline;}"
                 )
                 add_btn.clicked.connect(partial(self._on_todo_add_task_clicked, sk_l))
-                sv.addWidget(add_btn)
+                sub_v.addWidget(add_btn)
 
                 for _rk, _sn, sub_key, info, task in rows:
                     task_id = str((task or {}).get("id", "") or "")
                     content = str((task or {}).get("content", "") or "").strip() or "（无内容）"
                     created = str((task or {}).get("created_at", "") or "")
                     pri = self._todo_effective_priority(task, info)
+                    due = str((task or {}).get("due_date", "") or "").strip()
                     is_done = self._normalize_task_status(task) == "已完成"
+                    due_level = _todo_due_highlight(due, is_done, today_s)
 
                     row_w = QWidget()
                     row_w.setStyleSheet("background: transparent;")
@@ -4076,16 +6577,33 @@ class QtMainWindow(QMainWindow):
                     body = QLabel(content)
                     body.setWordWrap(True)
                     body.setFont(_pfn_qfont_pt(9))
-                    body.setStyleSheet("color:#86909C;" if is_done else "color:#1F2329;")
+                    body.setStyleSheet(_todo_task_body_style(due_level, is_done))
                     body.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
 
-                    meta = QLabel(f"创建：{created}  ·  优先级：{pri}")
-                    meta.setStyleSheet("color:#C9CDD4;" if is_done else "color:#86909C;")
+                    meta_parts = [f"创建：{created}", f"优先级：{pri}"]
+                    if due:
+                        meta_parts.append(f"截止：{due}")
+                    atts = (task or {}).get("attachments") if isinstance(task, dict) else None
+                    n_att = len(atts) if isinstance(atts, list) else 0
+                    meta_text = "  ·  ".join(meta_parts)
+
+                    meta_row = QWidget()
+                    meta_row.setStyleSheet("background:transparent; border:none;")
+                    meta_row.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                    m_h = QHBoxLayout(meta_row)
+                    m_h.setContentsMargins(0, 0, 0, 0)
+                    m_h.setSpacing(8)
+                    meta = QLabel(meta_text)
+                    meta.setStyleSheet(_todo_task_meta_style(due_level, is_done))
                     meta.setFont(_pfn_qfont_pt(8))
                     meta.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                    m_h.addWidget(meta, 1, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignLeft)
+                    badge = _pfn_personal_todo_attach_badge(n_att, is_done, due_level)
+                    if badge is not None:
+                        m_h.addWidget(badge, 0, Qt.AlignmentFlag.AlignVCenter | Qt.AlignmentFlag.AlignRight)
 
                     tv.addWidget(body)
-                    tv.addWidget(meta)
+                    tv.addWidget(meta_row)
 
                     row_h.addWidget(chk, 0, Qt.AlignmentFlag.AlignTop)
                     row_h.addWidget(text_col, 1)
@@ -4098,7 +6616,42 @@ class QtMainWindow(QMainWindow):
                         partial(self._on_todo_row_context_menu, row_w, sub_key, task_id)
                     )
 
-                    sv.addWidget(row_w)
+                    sub_v.addWidget(row_w)
+
+                head_row = _TodoSubprojectHeadRow(
+                    on_toggle=partial(self._toggle_todo_subproject, sk_l, sub_body),
+                    status_hint="点击折叠/展开 · 右键跳转收藏库、编辑时间节点或从待办移除",
+                )
+                head_h = head_row._head_layout
+                st_lbl = QLabel(sub_name or "（未命名项目）")
+                st_lbl.setStyleSheet("color:#1F2329; background:transparent;")
+                st_lbl.setFont(_pfn_qfont_pt(10, True))
+                st_lbl.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                head_h.addWidget(st_lbl, 0)
+                head_h.addSpacing(8)
+                for m in _pfn_normalize_milestones(info_b.get("milestones")):
+                    try:
+                        ms_name = str(m.get("name", "") or "").strip()
+                        chip = QLabel(f"[{ms_name}：{m['date']}]")
+                        chip.setStyleSheet(
+                            "color:#165DFF; background:#EAF3FF; border:1px solid #B7D1FF; padding:3px 10px; border-radius:7px;"
+                        )
+                        chip.setFont(_pfn_qfont_pt(8, True))
+                        chip.setAttribute(Qt.WidgetAttribute.WA_TransparentForMouseEvents, True)
+                        head_h.addWidget(chip, 0)
+                    except Exception:
+                        continue
+                head_h.addStretch(1)
+                head_row.setContextMenuPolicy(Qt.ContextMenuPolicy.CustomContextMenu)
+                head_row.customContextMenuRequested.connect(
+                    partial(self._on_todo_subproject_header_context, sk_l, sub_name)
+                )
+
+                sv.addWidget(head_row)
+                sv.addWidget(sub_body)
+
+                is_sub_expanded = bool(self._todo_subproject_expanded.get(sk_l, True))
+                self._apply_todo_sub_body_collapsed_ui(sub_body, is_sub_expanded)
 
                 # 子项目标题相对产品标题缩进 20px（外层缩进，不靠 padding）
                 sub_wrap = QWidget()
@@ -4125,10 +6678,10 @@ class QtMainWindow(QMainWindow):
             else:
                 prod_content.setVisible(True)
                 prod_content.setMaximumHeight(16777215)
-            prod_title_btn.clicked.connect(partial(self._toggle_todo_product, pname, prod_content))
+            prod_title_btn.clicked.connect(partial(self._on_prod_title_toggle_click, pname, prod_content))
             prod_frame._pfn_product_name = str(pname)
             self.todo_layout.addWidget(prod_frame)
-            self._todo_register_product_drag_targets(prod_frame)
+            self._todo_register_product_drag_targets(prod_title_btn)
 
         # 关键：吸收滚动区剩余高度，避免最后一个卡片被拉伸“变形”
         self.todo_layout.addStretch(1)
@@ -4197,12 +6750,105 @@ class QtMainWindow(QMainWindow):
             )
         except Exception:
             pass
-        self._refresh_project_management_panel()
+        self._refresh_todo_after_inline_edit()
+
+    def _refresh_todo_after_inline_edit(self):
+        """本地待办操作（勾选、编辑、增删、移除产品/子项目、编辑时间节点）：直接刷新待办与图表，不显示「加载中…」遮罩。"""
+        try:
+            self._do_refresh_project_management_panel()
+        except Exception as e:
+            try:
+                print(f"[PFN] 待办轻量刷新失败: {e}", flush=True)
+            except Exception:
+                pass
+
+    def _on_personal_todo_checkbox_toggled(self, task_id: str, checked: bool):
+        setter = getattr(self.core.config, "update_personal_task", None)
+        if not callable(setter):
+            return
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        patch = {"status": "已完成" if checked else "未完成", "completed_at": now if checked else ""}
+        if setter(task_id, patch):
+            self._rebuild_todo_panel()
+
+    def _on_personal_todo_add_clicked(self):
+        new_id = str(uuid.uuid4())
+        dlg = PersonalTodoTaskEditDialog(self, "添加个人任务", None, self.core.config, new_id)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        content = dlg.get_content()
+        if not content:
+            return
+        done = dlg.is_done()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        item = {
+            "id": new_id,
+            "content": content,
+            "created_at": now,
+            "status": "已完成" if done else "未完成",
+            "completed_at": now if done else "",
+            "priority": dlg.get_priority(),
+            "due_date": dlg.get_due_date(),
+            "attachments": dlg.get_attachments(),
+        }
+        adder = getattr(self.core.config, "add_personal_task", None)
+        if callable(adder) and adder(item):
+            self._rebuild_todo_panel()
+
+    def _open_personal_todo_task_editor(self, task_id: str):
+        getter = getattr(self.core.config, "get_personal_tasks", None)
+        updater = getattr(self.core.config, "update_personal_task", None)
+        if not callable(getter) or not callable(updater):
+            return
+        tasks = getter()
+        if not isinstance(tasks, list):
+            return
+        target = None
+        for t in tasks:
+            if isinstance(t, dict) and str(t.get("id", "")) == str(task_id):
+                target = dict(t)
+                break
+        if target is None:
+            return
+        dlg = PersonalTodoTaskEditDialog(self, "编辑个人任务", target, self.core.config)
+        if dlg.exec() != QDialog.DialogCode.Accepted:
+            return
+        content = dlg.get_content()
+        if not content:
+            return
+        done = dlg.is_done()
+        now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+        patch = {
+            "content": content,
+            "priority": dlg.get_priority(),
+            "due_date": dlg.get_due_date(),
+            "status": "已完成" if done else "未完成",
+            "completed_at": now if done else "",
+            "attachments": dlg.get_attachments(),
+        }
+        if updater(task_id, patch):
+            self._rebuild_todo_panel()
+
+    def _on_personal_todo_row_context_menu(self, source_widget, task_id: str, pos):
+        menu = QMenu(self)
+        act_edit = menu.addAction("编辑任务")
+        act_del = menu.addAction("删除任务")
+        _style_pfn_context_menu(menu)
+        action = menu.exec(source_widget.mapToGlobal(pos))
+        if action is None:
+            return
+        if action == act_edit:
+            self._open_personal_todo_task_editor(task_id)
+        elif action == act_del:
+            deleter = getattr(self.core.config, "delete_personal_task", None)
+            if callable(deleter) and deleter(task_id):
+                self._rebuild_todo_panel()
 
     def _on_todo_row_context_menu(self, source_widget, sub_key: str, task_id: str, pos):
         menu = QMenu(self)
         act_edit = menu.addAction("编辑任务")
         act_del = menu.addAction("删除任务")
+        _style_pfn_context_menu(menu)
         action = menu.exec(source_widget.mapToGlobal(pos))
         if action is None:
             return
@@ -4313,6 +6959,14 @@ class QtMainWindow(QMainWindow):
         except Exception as e:
             try:
                 print(f"[PFN] 待办列表重建失败: {e}", flush=True)
+            except Exception:
+                pass
+
+        try:
+            self._rebuild_milestones_calendar_panel(pm=pm)
+        except Exception as e:
+            try:
+                print(f"[PFN] 关键时间节点视图重建失败: {e}", flush=True)
             except Exception:
                 pass
 
@@ -4715,10 +7369,13 @@ class QtMainWindow(QMainWindow):
         if target is None:
             return
         sub_name = str(info.get("subproject_name", "") or sub_key)
-        dlg = SingleTodoTaskEditDialog(
+        dlg = PersonalTodoTaskEditDialog(
             self,
             f"编辑任务 - {sub_name}",
             target,
+            self.core.config,
+            task_id=str(target.get("id", "") or ""),
+            project_sub_key=sub_key,
             default_priority=str(info.get("priority", "中") or "中"),
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -4731,6 +7388,7 @@ class QtMainWindow(QMainWindow):
                 pass
             return
         pri = dlg.get_priority()
+        due = dlg.get_due_date()
         done = dlg.is_done()
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         changed = False
@@ -4739,6 +7397,8 @@ class QtMainWindow(QMainWindow):
                 continue
             t["content"] = content
             t["priority"] = pri
+            t["due_date"] = due
+            t["attachments"] = dlg.get_attachments()
             if done:
                 t["status"] = "已完成"
                 if not str(t.get("completed_at", "") or "").strip():
@@ -4753,32 +7413,46 @@ class QtMainWindow(QMainWindow):
         setter = getattr(self.core.config, "upsert_subproject", None)
         if callable(setter):
             setter(sub_key, tasks=tasks)
-        self._refresh_project_management_panel()
+        self._refresh_todo_after_inline_edit()
 
     def _apply_subproject_tasks_editor_result(self, sub_key: str, sub_info: dict, dlg: SubprojectTasksEditorDialog, log_name: str = ""):
         """将 SubprojectTasksEditorDialog 的结果写回配置（任务行 + 里程碑）。"""
         setter = getattr(self.core.config, "upsert_subproject", None)
         if not callable(setter) or not isinstance(sub_info, dict):
             return False
-        lines = dlg.get_task_lines()
         milestones = dlg.get_milestones_dict()
+        if getattr(dlg, "_milestones_only", False):
+            setter(sub_key, milestones=milestones)
+            try:
+                pnm = str(log_name or sub_key)
+                print(f"[Task Saved] 项目: {pnm}, 已更新时间节点", flush=True)
+            except Exception:
+                pass
+            return True
+        lines = dlg.get_task_lines()
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         old_tasks = sub_info.get("tasks", []) or []
         new_tasks = []
         sub_pri = str(sub_info.get("priority", "中") or "中")
+        sk = str(sub_key or "").strip().lower()
         for idx, line in enumerate(lines):
             if idx < len(old_tasks) and isinstance(old_tasks[idx], dict):
                 old = old_tasks[idx]
                 op = str(old.get("priority", "") or "").strip()
                 if op not in ("高", "中", "低"):
                     op = sub_pri
+                nid = str(old.get("id", "") or "").strip() or str(uuid.uuid4())
+                att_raw = old.get("attachments") if isinstance(old.get("attachments"), list) else []
+                att_norm = list(ConfigManager._normalize_project_task_attachments_list(att_raw, sk, nid))
                 new_tasks.append({
-                    "id": old.get("id", str(uuid.uuid4())),
+                    "id": nid,
                     "content": line,
                     "created_at": old.get("created_at", now),
                     "status": old.get("status", "未完成"),
                     "completed_at": old.get("completed_at", ""),
                     "priority": op,
+                    "due_date": str(old.get("due_date", "") or "").strip(),
+                    "attachments": att_norm,
                 })
             else:
                 new_tasks.append({
@@ -4788,6 +7462,8 @@ class QtMainWindow(QMainWindow):
                     "status": "未完成",
                     "completed_at": "",
                     "priority": sub_pri,
+                    "due_date": "",
+                    "attachments": [],
                 })
         setter(sub_key, tasks=new_tasks, milestones=milestones)
         try:
@@ -4799,8 +7475,63 @@ class QtMainWindow(QMainWindow):
             pass
         return True
 
+    def _hide_todo_product(self, product_name: str) -> bool:
+        pname = str(product_name or "").strip() or "（未命名产品）"
+        if not pname:
+            return False
+        r = QMessageBox.question(
+            self,
+            "确认移除",
+            f"确定从待办列表移除产品「{pname}」？\n"
+            "其下子项目与任务数据仍保留，并继续计入「项目数据分析」统计；左侧收藏路径保留。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if r != QMessageBox.StandardButton.Yes:
+            return False
+        hider = getattr(self.core.config, "hide_todo_product", None)
+        if not callable(hider) or not hider(pname):
+            return False
+        self._refresh_todo_after_inline_edit()
+        self.statusBar().showMessage(f"已从待办移除产品：{pname}", 2500)
+        return True
+
+    def _on_todo_product_header_context(self, product_name: str, pos: QPoint):
+        w = self.sender()
+        if not isinstance(w, QWidget):
+            return
+        pname = str(product_name or "").strip() or "（未命名产品）"
+        menu = QMenu(self)
+        act_hide = menu.addAction("从待办移除产品…")
+        _style_pfn_context_menu(menu)
+        act = menu.exec(w.mapToGlobal(pos))
+        if act == act_hide:
+            self._hide_todo_product(pname)
+
+    def _hide_todo_subproject(self, sub_key: str, sub_name: str) -> bool:
+        sk = str(sub_key or "").strip().lower()
+        disp = str(sub_name or sk or "（未命名项目）")
+        if not sk:
+            return False
+        r = QMessageBox.question(
+            self,
+            "确认移除",
+            f"确定从待办列表移除项目「{disp}」？\n"
+            "任务数据仍保留，并继续计入「项目数据分析」统计；左侧收藏路径保留。",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if r != QMessageBox.StandardButton.Yes:
+            return False
+        hider = getattr(self.core.config, "hide_todo_subproject", None)
+        if not callable(hider) or not hider(sk):
+            return False
+        self._refresh_todo_after_inline_edit()
+        self.statusBar().showMessage(f"已从待办移除项目：{disp}", 2500)
+        return True
+
     def _on_todo_subproject_header_context(self, sub_key: str, sub_name: str, pos: QPoint):
-        """待办区子项目标题行右键：仅「编辑时间节点」。"""
+        """待办区子项目标题行右键：跳转收藏库、编辑时间节点、从待办移除。"""
         w = self.sender()
         if not isinstance(w, QWidget):
             return
@@ -4808,30 +7539,21 @@ class QtMainWindow(QMainWindow):
         if not sk:
             return
         menu = QMenu(self)
+        act_goto = menu.addAction("跳转至收藏库")
         act_ms = menu.addAction("编辑时间节点…")
+        act_hide = menu.addAction("从待办移除…")
+        _style_pfn_context_menu(menu)
         act = menu.exec(w.mapToGlobal(pos))
-        if act != act_ms:
+        if act is None:
             return
-        pm = self._project_management_data()
-        subs = pm.get("subprojects", {}) if isinstance(pm, dict) else {}
-        sub_info = subs.get(sk, {}) if isinstance(subs, dict) else {}
-        if not isinstance(sub_info, dict):
+        if act == act_goto:
+            self._goto_subproject_favorite_library(sk, sub_name)
             return
-        disp = str(sub_name or sub_info.get("subproject_name", "") or sk)
-        old_tasks = sub_info.get("tasks", []) or []
-        old_lines = [str(t.get("content", "")).strip() for t in old_tasks if isinstance(t, dict) and str(t.get("content", "")).strip()]
-        ms = sub_info.get("milestones") if isinstance(sub_info, dict) else None
-        dlg = SubprojectTasksEditorDialog(
-            self,
-            f"编辑时间节点 — {disp}",
-            old_lines,
-            ms,
-            milestones_only=True,
-        )
-        if dlg.exec() != QDialog.DialogCode.Accepted:
+        if act == act_hide:
+            self._hide_todo_subproject(sk, sub_name)
             return
-        self._apply_subproject_tasks_editor_result(sk, sub_info, dlg, disp)
-        self._refresh_project_management_panel()
+        if act == act_ms:
+            self._edit_subproject_milestones(sk, sub_name)
 
     def _on_todo_add_task_clicked(self, sub_key: str):
         sk = str(sub_key or "").strip().lower()
@@ -4842,10 +7564,14 @@ class QtMainWindow(QMainWindow):
         if not isinstance(info, dict):
             return
         sub_name = str(info.get("subproject_name", "") or sk)
-        dlg = SingleTodoTaskEditDialog(
+        new_id = str(uuid.uuid4())
+        dlg = PersonalTodoTaskEditDialog(
             self,
             f"添加任务 - {sub_name}",
             None,
+            self.core.config,
+            task_id=new_id,
+            project_sub_key=sk,
             default_priority=str(info.get("priority", "中") or "中"),
         )
         if dlg.exec() != QDialog.DialogCode.Accepted:
@@ -4854,22 +7580,25 @@ class QtMainWindow(QMainWindow):
         if not content:
             return
         pri = dlg.get_priority()
+        due = dlg.get_due_date()
         done = dlg.is_done()
         now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
         tasks = list(info.get("tasks", []) or [])
         nt = {
-            "id": str(uuid.uuid4()),
+            "id": new_id,
             "content": content,
             "created_at": now,
             "status": "已完成" if done else "未完成",
             "completed_at": now if done else "",
             "priority": pri,
+            "due_date": due,
+            "attachments": dlg.get_attachments(),
         }
         tasks.append(nt)
         setter = getattr(self.core.config, "upsert_subproject", None)
         if callable(setter):
             setter(sk, tasks=tasks)
-        self._refresh_project_management_panel()
+        self._refresh_todo_after_inline_edit()
 
     def _update_single_task(self, sub_key, task_id, action_text):
         pm = self._project_management_data()
@@ -4894,6 +7623,9 @@ class QtMainWindow(QMainWindow):
                 t["completed_at"] = ""
                 changed = True
             elif action_text == "删除任务":
+                rm = getattr(self.core.config, "remove_project_task_attachments_dir", None)
+                if callable(rm):
+                    rm(sub_key, task_id)
                 tasks.remove(t)
                 changed = True
             break
@@ -4902,7 +7634,7 @@ class QtMainWindow(QMainWindow):
         setter = getattr(self.core.config, "upsert_subproject", None)
         if callable(setter):
             setter(sub_key, tasks=tasks)
-        self._refresh_project_management_panel()
+        self._refresh_todo_after_inline_edit()
 
     def _focus_tree_subproject(self, sub_key):
         item = self._subproject_item_index.get(str(sub_key or "").lower())
@@ -4913,6 +7645,100 @@ class QtMainWindow(QMainWindow):
             cur.setExpanded(True)
             cur = cur.parent()
         self.fav_tree.setCurrentItem(item)
+
+    def _resolve_favorite_for_sub_key(self, sub_key: str):
+        sk = str(sub_key or "").strip().lower()
+        if not sk:
+            return None, None
+        for f in self.core.get_favorites():
+            if not isinstance(f, dict):
+                continue
+            dt = f.get("dir_type", "projects")
+            meta = self._extract_project_meta_from_path(f.get("full_path", ""), dt)
+            if meta.get("sub_key") == sk:
+                return f, meta
+        return None, None
+
+    def _goto_subproject_favorite_library(self, sub_key: str, sub_name: str):
+        """待办子项目：定位左侧收藏树 trial 节点，右侧展示该项目收藏/归类目录。"""
+        sk = str(sub_key or "").strip().lower()
+        if not sk:
+            return
+        pm = self._project_management_data()
+        subs = pm.get("subprojects", {}) if isinstance(pm, dict) else {}
+        sub_info = subs.get(sk, {}) if isinstance(subs, dict) else {}
+        if not isinstance(sub_info, dict):
+            sub_info = {}
+        disp = str(sub_name or sub_info.get("subproject_name", "") or sk).strip()
+
+        self._snapshot_fs_view_state_if_explorer()
+        self._showing_utility = False
+
+        item = self._subproject_item_index.get(sk)
+        if item is None:
+            self._rebuild_subproject_index()
+            item = self._subproject_item_index.get(sk)
+        if item is not None:
+            cur = item
+            while cur:
+                cur.setExpanded(True)
+                cur = cur.parent()
+            try:
+                self.fav_tree.scrollToItem(item)
+            except Exception:
+                pass
+            self.fav_tree.setCurrentItem(item)
+            self.statusBar().showMessage(f"已打开收藏库：{disp}", 2500)
+            return
+
+        fav, meta = self._resolve_favorite_for_sub_key(sk)
+        if isinstance(fav, dict):
+            fpath = os.path.normpath(str(fav.get("full_path", "") or "")).replace("/", "\\")
+            if fpath and os.path.isdir(fpath):
+                self.current_fav = fav
+                self._show_right_explorer_view()
+                QTimer.singleShot(0, self._refresh_tree)
+                fid = str(fav.get("id", "") or "").strip()
+                try:
+                    self.fav_tree.blockSignals(True)
+                    if fid:
+                        self._select_fav_in_tree(fid)
+                    elif isinstance(meta, dict):
+                        trial_path = str(meta.get("path", "") or "")
+                        pin_name = str(sub_name or meta.get("subproject_name", "") or "").strip()
+                        if pin_name and trial_path:
+                            node = self._find_fav_item_by_name_path(pin_name, trial_path)
+                            if node is not None:
+                                cur = node
+                                while cur:
+                                    cur.setExpanded(True)
+                                    cur = cur.parent()
+                                try:
+                                    self.fav_tree.scrollToItem(node)
+                                except Exception:
+                                    pass
+                                self.fav_tree.setCurrentItem(node)
+                finally:
+                    self.fav_tree.blockSignals(False)
+                self.statusBar().showMessage(f"已打开收藏库：{disp}", 2500)
+                return
+
+        path_candidates = []
+        p_cfg = str(sub_info.get("path", "") or "").strip()
+        if p_cfg:
+            path_candidates.append(p_cfg)
+        path_candidates.append(sk)
+        for raw in path_candidates:
+            p = os.path.normpath(str(raw or "")).replace("/", "\\")
+            if p and os.path.isdir(p):
+                self.current_fav = self._to_explorer_fav(p)
+                self._show_right_explorer_view()
+                QTimer.singleShot(0, self._refresh_tree)
+                self._focus_tree_subproject(sk)
+                self.statusBar().showMessage(f"未加入收藏，按目录浏览：{disp}", 3500)
+                return
+
+        self.statusBar().showMessage(f"未在收藏库中找到该项目：{disp}", 4000)
 
     def _update_current_subproject_from_item(self, item):
         self._current_selected_sub_key = ""
@@ -5248,12 +8074,8 @@ class QtMainWindow(QMainWindow):
             return
         QTimer.singleShot(0, self.save_tree_expand_state)
 
-    def save_tree_expand_state(self):
-        """保存左侧收藏树展开状态到配置。"""
-        if getattr(self, "_fav_tree_rebuilding", False):
-            return
-        if getattr(self, "_restoring_fav_expand_state", False):
-            return
+    def _collect_fav_expand_states(self):
+        """采集左侧收藏树当前展开状态。"""
         states = {}
         for i in range(self.fav_tree.topLevelItemCount()):
             top = self.fav_tree.topLevelItem(i)
@@ -5265,6 +8087,36 @@ class QtMainWindow(QMainWindow):
                     states[key] = bool(cur.isExpanded())
                 for j in range(cur.childCount() - 1, -1, -1):
                     stack.append(cur.child(j))
+        return states
+
+    def _apply_fav_expand_states(self, states, *, default=False):
+        """按路径键批量恢复左侧收藏树展开状态。"""
+        if not isinstance(states, dict):
+            states = {}
+        self._restoring_fav_expand_state = True
+        try:
+            for i in range(self.fav_tree.topLevelItemCount()):
+                top = self.fav_tree.topLevelItem(i)
+                stack = [top]
+                while stack:
+                    cur = stack.pop()
+                    key = self._fav_item_key(cur)
+                    if key:
+                        cur.setExpanded(bool(states.get(key, default)))
+                    else:
+                        cur.setExpanded(False)
+                    for j in range(cur.childCount() - 1, -1, -1):
+                        stack.append(cur.child(j))
+        finally:
+            self._restoring_fav_expand_state = False
+
+    def save_tree_expand_state(self):
+        """保存左侧收藏树展开状态到配置。"""
+        if getattr(self, "_fav_tree_rebuilding", False):
+            return
+        if getattr(self, "_restoring_fav_expand_state", False):
+            return
+        states = self._collect_fav_expand_states()
         try:
             setter = getattr(self.core.config, "set_fav_tree_expand_states", None)
             if callable(setter):
@@ -5281,24 +8133,8 @@ class QtMainWindow(QMainWindow):
             saved = {}
         if not isinstance(saved, dict):
             saved = {}
-        valid_keys = set()
-        self._restoring_fav_expand_state = True
-        try:
-            for i in range(self.fav_tree.topLevelItemCount()):
-                top = self.fav_tree.topLevelItem(i)
-                stack = [top]
-                while stack:
-                    cur = stack.pop()
-                    key = self._fav_item_key(cur)
-                    if key:
-                        valid_keys.add(key)
-                        cur.setExpanded(bool(saved.get(key, False)))
-                    else:
-                        cur.setExpanded(False)
-                    for j in range(cur.childCount() - 1, -1, -1):
-                        stack.append(cur.child(j))
-        finally:
-            self._restoring_fav_expand_state = False
+        self._apply_fav_expand_states(saved, default=False)
+        valid_keys = set(self._collect_fav_expand_states().keys())
         cleaned = {k: bool(v) for k, v in saved.items() if k in valid_keys}
         if cleaned != saved:
             try:
@@ -5309,6 +8145,7 @@ class QtMainWindow(QMainWindow):
                 pass
     
     def _load_favorites(self):
+        expand_snapshot = self._collect_fav_expand_states()
         self._fav_tree_rebuilding = True
         try:
             self.fav_tree.blockSignals(True)
@@ -5692,7 +8529,8 @@ class QtMainWindow(QMainWindow):
     
             def _after_fav_restore():
                 try:
-                    self.restore_tree_expand_state()
+                    self._apply_fav_expand_states(expand_snapshot, default=False)
+                    self.save_tree_expand_state()
                 finally:
                     self._fav_tree_rebuilding = False
     
@@ -6077,6 +8915,7 @@ class QtMainWindow(QMainWindow):
             act_del = None
             if product_favs:
                 act_del = menu.addAction("删除产品下全部子项目")
+            _style_pfn_context_menu(menu)
             act = menu.exec(self.fav_tree.mapToGlobal(pos))
             _restore_prev_state_if_no_action(act)
             if act == act_unpin:
@@ -6133,6 +8972,7 @@ class QtMainWindow(QMainWindow):
             act_p_l = priority_menu.addAction("低")
             act_edit_task = menu.addAction("编辑项目任务")
             act_del = menu.addAction("删除本试验下全部子项目")
+            _style_pfn_context_menu(menu)
             action = menu.exec(self.fav_tree.mapToGlobal(pos))
             _restore_prev_state_if_no_action(action)
             # 关键：未选择任何菜单项（点空白/ESC）时，必须直接退出。
@@ -6219,6 +9059,7 @@ class QtMainWindow(QMainWindow):
                 if ref and self._is_pinned(ref[0], ref[1]):
                     act_pin.setEnabled(False)
                 act_del = menu.addAction("删除子项目")
+            _style_pfn_context_menu(menu)
             act = menu.exec(self.fav_tree.mapToGlobal(pos))
             _restore_prev_state_if_no_action(act)
             if act == act_open:
@@ -6252,6 +9093,7 @@ class QtMainWindow(QMainWindow):
             p_path = os.path.normpath(str(pin.get("path", ""))).replace("/", "\\")
             act_open = menu.addAction("打开所在文件夹")
             act_unpin = menu.addAction("取消置顶")
+            _style_pfn_context_menu(menu)
             act = menu.exec(self.fav_tree.mapToGlobal(pos))
             _restore_prev_state_if_no_action(act)
             if act == act_open and p_path:
@@ -6269,6 +9111,7 @@ class QtMainWindow(QMainWindow):
             if ref and self._is_pinned(ref[0], ref[1]):
                 act_pin.setEnabled(False)
             act_del = menu.addAction("删除整个项目")
+            _style_pfn_context_menu(menu)
             act = menu.exec(self.fav_tree.mapToGlobal(pos))
             _restore_prev_state_if_no_action(act)
             if act == act_open:
@@ -6317,80 +9160,96 @@ class QtMainWindow(QMainWindow):
 
     def _do_refresh_tree(self):
         """异步执行：构建右侧文件树"""
+        expanded_snapshot = set()
+        pid = None
+        if self.current_fav and not self._showing_utility:
+            pid = self.current_fav["id"]
+            expanded_snapshot = set(self.core.fs_expanded.get(pid, set()))
+
         self.tree.setUpdatesEnabled(False)
+        self._fs_tree_rebuilding = True
         try:
-            self.tree.clear()
+            self.tree.blockSignals(True)
+            try:
+                self.tree.clear()
+            finally:
+                self.tree.blockSignals(False)
+
             if self._showing_utility:
                 self._build_utility_tree()
                 return
             if self.current_fav and self.current_fav.get("dir_type") == "explorer":
                 base = os.path.normpath(self.current_fav["full_path"]).replace("/", "\\")
                 self._build_explorer_folder_tree(base)
-                pid = self.current_fav["id"]
-                expanded = self.core.fs_expanded.get(pid, set())
-                if expanded:
-                    self._restore_expanded(expanded)
+            elif not self.current_fav:
                 return
-            if not self.current_fav:
-                return
-            base = os.path.normpath(self.current_fav["full_path"]).replace("/", "\\")
-            dir_type = self.current_fav.get("dir_type", "")
-            is_users = dir_type and dir_type.startswith("users")
-            # projects/unblinded: 完整节点；users: M5 / program / util 聚合
-            if is_users:
-                # user 下与 projects 对齐：仅 product→trial→子目录，不再展示 M5 分类
-                path_order = [
-                    ("program", ["06_programs", "09_validation"]),
-                    ("util", ["utility/macros", "utility/metadata", "utility/tools"]),
-                ]
             else:
-                path_order = [
-                    ("data", None),
-                    ("M5", ["04_crt", "utility/documentation/06_crt_preparation"]),
-                    ("program", ["06_programs", "09_validation"]),
-                    ("reports", "03_reports"),
-                    ("protocol", "utility/documentation/01_protocol"),
-                    ("data_management", "utility/documentation/02_data_management"),
-                    ("statistics", "utility/documentation/03_statistics"),
-                    ("review_comments", "utility/documentation/04_review_comments"),
-                    ("logs", "07_logs"),
-                    ("util", ["utility/macros", "utility/metadata", "utility/tools"]),
-                ]
-            for disp, rel in path_order:
-                if rel is None:
-                    data_item = QTreeWidgetItem([disp, ""])
-                    data_item.setData(0, Qt.ItemDataRole.UserRole, None)
-                    data_item.setData(1, Qt.ItemDataRole.UserRole, "folder_group")
-                    data_item.setIcon(0, icon_folder_yellow())
-                    for sub in ["00_source_data", "01_sdtm", "02_adam"]:
-                        sp = os.path.normpath(os.path.join(base, sub)).replace("/", "\\")
-                        sub_item = QTreeWidgetItem([_strip_prefix(sub), ""])
-                        sub_item.setData(0, Qt.ItemDataRole.UserRole, sp)
-                        sub_item.setData(1, Qt.ItemDataRole.UserRole, "ok" if os.path.exists(sp) else "unavailable")
-                        sub_item.setToolTip(0, sp)
-                        if os.path.exists(sp):
-                            placeholder = QTreeWidgetItem(["...", ""])
-                            placeholder.setData(0, Qt.ItemDataRole.UserRole, None)
-                            sub_item.addChild(placeholder)
-                            sub_item.setIcon(0, icon_folder_yellow())
-                        else:
-                            sub_item.setForeground(0, Qt.GlobalColor.red)
-                            sub_item.setIcon(0, icon_folder_yellow())
-                        data_item.addChild(sub_item)
-                    self.tree.addTopLevelItem(data_item)
-                elif isinstance(rel, list):
-                    self._add_aggregate_node(disp, rel, base)
+                base = os.path.normpath(self.current_fav["full_path"]).replace("/", "\\")
+                dir_type = self.current_fav.get("dir_type", "")
+                is_users = dir_type and dir_type.startswith("users")
+                # projects/unblinded: 完整节点；users: M5 / program / util 聚合
+                if is_users:
+                    # user 下与 projects 对齐：仅 product→trial→子目录，不再展示 M5 分类
+                    path_order = [
+                        ("program", ["06_programs", "09_validation"]),
+                        ("util", ["utility/macros", "utility/metadata", "utility/tools"]),
+                    ]
                 else:
-                    p = os.path.normpath(os.path.join(base, rel)).replace("/", "\\")
-                    self._add_folder_node(disp, p)
-            if not is_users:
-                docs_root = self._build_documents_node(base)
-                self.tree.addTopLevelItem(docs_root)
-            pid = self.current_fav["id"]
-            expanded = self.core.fs_expanded.get(pid, set())
-            if expanded:
-                self._restore_expanded(expanded)
+                    path_order = [
+                        ("data", None),
+                        ("M5", ["04_crt", "utility/documentation/06_crt_preparation"]),
+                        ("program", ["06_programs", "09_validation"]),
+                        ("reports", "03_reports"),
+                        ("protocol", "utility/documentation/01_protocol"),
+                        ("data_management", "utility/documentation/02_data_management"),
+                        ("statistics", "utility/documentation/03_statistics"),
+                        ("review_comments", "utility/documentation/04_review_comments"),
+                        ("logs", "07_logs"),
+                        ("archive", "99_archive"),
+                        ("util", ["utility/macros", "utility/metadata", "utility/tools"]),
+                    ]
+                for disp, rel in path_order:
+                    if rel is None:
+                        data_item = QTreeWidgetItem([disp, ""])
+                        data_item.setData(0, Qt.ItemDataRole.UserRole, None)
+                        data_item.setData(1, Qt.ItemDataRole.UserRole, "folder_group")
+                        data_item.setIcon(0, icon_folder_yellow())
+                        for sub in ["00_source_data", "01_sdtm", "02_adam"]:
+                            sp = os.path.normpath(os.path.join(base, sub)).replace("/", "\\")
+                            sub_item = QTreeWidgetItem([_strip_prefix(sub), ""])
+                            sub_item.setData(0, Qt.ItemDataRole.UserRole, sp)
+                            sub_item.setData(1, Qt.ItemDataRole.UserRole, "ok" if os.path.exists(sp) else "unavailable")
+                            sub_item.setToolTip(0, sp)
+                            if os.path.exists(sp):
+                                placeholder = QTreeWidgetItem(["...", ""])
+                                placeholder.setData(0, Qt.ItemDataRole.UserRole, None)
+                                sub_item.addChild(placeholder)
+                                sub_item.setIcon(0, icon_folder_yellow())
+                            else:
+                                sub_item.setForeground(0, Qt.GlobalColor.red)
+                                sub_item.setIcon(0, icon_folder_yellow())
+                            data_item.addChild(sub_item)
+                        self.tree.addTopLevelItem(data_item)
+                    elif isinstance(rel, list):
+                        self._add_aggregate_node(disp, rel, base)
+                    else:
+                        p = os.path.normpath(os.path.join(base, rel)).replace("/", "\\")
+                        self._add_folder_node(disp, p)
+                if is_users:
+                    self.tree.addTopLevelItem(self._build_documentations_node_users(base))
+                else:
+                    docs_root = self._build_documents_node(base)
+                    self.tree.addTopLevelItem(docs_root)
+
+            if expanded_snapshot and pid:
+                self._restoring_fs_expand_state = True
+                try:
+                    self._restore_expanded(expanded_snapshot)
+                    self.core.fs_expanded[pid] = set(expanded_snapshot)
+                finally:
+                    self._restoring_fs_expand_state = False
         finally:
+            self._fs_tree_rebuilding = False
             self.tree.setUpdatesEnabled(True)
             self._hide_loading()
             self._schedule_restore_fs_view_state()
@@ -6490,6 +9349,8 @@ class QtMainWindow(QMainWindow):
             self.core.fs_expanded[pid] = s
     
     def _on_tree_collapsed(self, item):
+        if getattr(self, "_fs_tree_rebuilding", False) or getattr(self, "_restoring_fs_expand_state", False):
+            return
         path = item.data(0, Qt.ItemDataRole.UserRole)
         if self.current_fav:
             pid = self.current_fav["id"]
@@ -6506,7 +9367,7 @@ class QtMainWindow(QMainWindow):
         typ = item.data(1, Qt.ItemDataRole.UserRole)
         if not path or typ in ["dir_placeholder", "unavailable"]:
             return
-        if typ == "dir":
+        if typ in ("dir", "docs_root", "documentations_root"):
             return
         path = os.path.normpath(path).replace("/", "\\")
         if path.lower().endswith(".pdf"):
@@ -7658,6 +10519,215 @@ class QtMainWindow(QMainWindow):
                 self.statusBar().showMessage(f"正在打开 {os.path.basename(path)}", 3000)
             else:
                 QMessageBox.critical(self, "打开失败", err)
+
+    @staticmethod
+    def _collect_word_rtf_paths_for_context(clicked_path, selected_files):
+        exts = {".doc", ".docx", ".rtf"}
+        out = []
+        candidates = []
+        if clicked_path:
+            candidates.append(clicked_path)
+        candidates.extend(selected_files or [])
+        for p in candidates:
+            if not p or not isinstance(p, str):
+                continue
+            if os.path.isfile(p) and os.path.splitext(p)[1].lower() in exts:
+                p = os.path.normpath(p).replace("/", "\\")
+                if p not in out:
+                    out.append(p)
+        return out
+
+    def _find_folder_tree_item(self, folder_path: str):
+        folder_path = os.path.normpath(str(folder_path or "")).replace("/", "\\")
+        if not folder_path:
+            return None
+        found = []
+
+        def walk(it):
+            p = it.data(0, Qt.ItemDataRole.UserRole)
+            t = it.data(1, Qt.ItemDataRole.UserRole)
+            if p and isinstance(p, str) and t != "file":
+                np = os.path.normpath(p).replace("/", "\\")
+                if np == folder_path and os.path.isdir(np):
+                    found.append(it)
+            for i in range(it.childCount()):
+                walk(it.child(i))
+
+        for i in range(self.tree.topLevelItemCount()):
+            walk(self.tree.topLevelItem(i))
+        return found[0] if found else None
+
+    def _find_parent_folder_tree_item(self, file_path: str):
+        """根据文件路径查找其父文件夹树节点（用于刷新）。"""
+        try:
+            file_key = os.path.normpath(os.path.abspath(os.fspath(file_path))).replace("/", "\\").lower()
+        except Exception:
+            file_key = os.path.normpath(str(file_path or "")).replace("/", "\\").lower()
+        if not file_key:
+            return None, None
+        found = []
+
+        def walk(it):
+            p = it.data(0, Qt.ItemDataRole.UserRole)
+            t = it.data(1, Qt.ItemDataRole.UserRole)
+            if p and t == "file" and isinstance(p, str):
+                try:
+                    pk = os.path.normpath(os.path.abspath(os.fspath(p))).replace("/", "\\").lower()
+                except Exception:
+                    pk = os.path.normpath(p).replace("/", "\\").lower()
+                if pk == file_key:
+                    par = it.parent()
+                    if par is not None:
+                        fp = par.data(0, Qt.ItemDataRole.UserRole)
+                        if fp and isinstance(fp, str) and os.path.isdir(fp):
+                            found.append((os.path.normpath(fp).replace("/", "\\"), par))
+            for i in range(it.childCount()):
+                walk(it.child(i))
+
+        for i in range(self.tree.topLevelItemCount()):
+            walk(self.tree.topLevelItem(i))
+        return found[0] if found else (None, None)
+
+    def _refresh_folders_for_paths(self, file_paths):
+        refreshed_dirs = set()
+        for p in file_paths or []:
+            if not p:
+                continue
+            d = os.path.dirname(os.path.normpath(str(p)).replace("/", "\\"))
+            if d and os.path.isdir(d) and d not in refreshed_dirs:
+                node = self._find_folder_tree_item(d)
+                if node is not None:
+                    try:
+                        self._refresh_folder_node(d, node)
+                        refreshed_dirs.add(d)
+                    except Exception:
+                        pass
+            if d in refreshed_dirs:
+                continue
+            _, par_item = self._find_parent_folder_tree_item(p)
+            if par_item is not None:
+                fp = par_item.data(0, Qt.ItemDataRole.UserRole)
+                if fp and isinstance(fp, str):
+                    fp = os.path.normpath(fp).replace("/", "\\")
+                    if fp not in refreshed_dirs:
+                        try:
+                            self._refresh_folder_node(fp, par_item)
+                            refreshed_dirs.add(fp)
+                        except Exception:
+                            pass
+
+    def _on_word_pdf_convert_progress(self, current: int, total: int, name: str):
+        dlg = getattr(self, "_word_pdf_progress_dlg", None)
+        if dlg is None:
+            return
+        try:
+            dlg.setMaximum(max(1, int(total)))
+            dlg.setValue(min(int(current), int(total)))
+            dlg.setLabelText(f"正在转换 ({current}/{total})：\n{name}")
+            QApplication.processEvents()
+        except Exception:
+            pass
+
+    def _on_word_pdf_convert_finished(self, results):
+        dlg = getattr(self, "_word_pdf_progress_dlg", None)
+        if dlg is not None:
+            try:
+                dlg.setValue(dlg.maximum())
+                dlg.close()
+            except Exception:
+                pass
+            self._word_pdf_progress_dlg = None
+        self._word_pdf_cancel_requested = False
+
+        results = results or []
+        n = len(results)
+        ok_count = sum(1 for r in results if r.get("ok"))
+        fail = [
+            f"{os.path.basename(r.get('src', ''))}: {r.get('err') or '未知错误'}"
+            for r in results
+            if not r.get("ok")
+        ]
+        success_srcs = [r["src"] for r in results if r.get("ok")]
+        if success_srcs:
+            try:
+                self._refresh_folders_for_paths(success_srcs)
+            except Exception:
+                pass
+        try:
+            if ok_count:
+                ok_names = [os.path.basename(r.get("src", "")) for r in results if r.get("ok")]
+                ok_lines = "\n".join(ok_names[:20])
+                if len(ok_names) > 20:
+                    ok_lines += f"\n... 等共 {len(ok_names)} 个"
+                QMessageBox.information(
+                    self,
+                    "转换成功",
+                    f"已成功将 {ok_count} 个文件转换为 PDF，保存在原文件所在文件夹。\n\n{ok_lines}",
+                )
+            if fail:
+                body = "\n".join(fail[:20])
+                if len(fail) > 20:
+                    body += f"\n... 共 {len(fail)} 条失败"
+                if ok_count:
+                    QMessageBox.warning(
+                        self,
+                        "部分文件转换失败",
+                        f"另有 {len(fail)} 个文件未能转换：\n\n{body}",
+                    )
+                else:
+                    QMessageBox.critical(self, "转换为 PDF 失败", body)
+        except Exception as e:
+            try:
+                QMessageBox.warning(self, "提示", f"转换已完成，但显示结果时出错：{e}")
+            except Exception:
+                pass
+        try:
+            if ok_count:
+                self.statusBar().showMessage(f"已转换 {ok_count}/{n} 个文件为 PDF", 5000)
+            else:
+                self.statusBar().showMessage("转换为 PDF 未完成", 4000)
+        except Exception:
+            pass
+
+    def _start_word_rtf_to_pdf_conversion(self, paths):
+        paths = list(paths or [])
+        if not paths:
+            return
+        n = len(paths)
+        self._word_pdf_cancel_requested = False
+        dlg = QProgressDialog("正在准备转换…", "取消", 0, n, self)
+        dlg.setWindowTitle("转换为 PDF")
+        dlg.setWindowModality(Qt.WindowModality.WindowModal)
+        dlg.setMinimumDuration(0)
+        dlg.setAutoClose(True)
+        dlg.setAutoReset(True)
+        dlg.canceled.connect(lambda: setattr(self, "_word_pdf_cancel_requested", True))
+        dlg.setValue(0)
+        self._word_pdf_progress_dlg = dlg
+        dlg.show()
+        QApplication.processEvents()
+
+        def worker():
+            def on_progress(cur, total, name):
+                try:
+                    self.word_pdf_convert_progress.emit(cur, total, name)
+                except Exception:
+                    pass
+
+            def cancel_check():
+                return bool(getattr(self, "_word_pdf_cancel_requested", False))
+
+            results = self.core.convert_word_rtf_to_pdf(
+                paths,
+                progress_callback=on_progress,
+                cancel_check=cancel_check,
+            )
+            try:
+                self.word_pdf_convert_finished.emit(results)
+            except Exception:
+                pass
+
+        threading.Thread(target=worker, daemon=True).start()
     
     def _on_tree_context(self, pos):
         # 必须从点击位置取节点，得到该行的真实路径（避免误用选中项或默认文档目录）
@@ -7707,8 +10777,13 @@ class QtMainWindow(QMainWindow):
         act_adobe = act_browser = None
         act_default_eg = act_default_vscode = None
         act_open_folder = act_copy_path = act_copy_names = act_copy_files = None
-        act_paste = act_rename_file = act_delete_files = None
+        act_paste = act_new_folder = act_rename_file = act_delete_files = None
+        act_rename_folder = act_delete_folders = None
         act_refresh_folder = act_sort_by_time = None
+        act_convert_pdf = None
+        word_rtf_paths = self._collect_word_rtf_paths_for_context(
+            path if is_file else None, selected_files
+        )
 
         # 第 1 组：打开操作类
         group1_has_item = False
@@ -7717,6 +10792,9 @@ class QtMainWindow(QMainWindow):
             group1_has_item = True
         elif is_file:
             act_open_selected = menu.addAction("打开文件")
+            group1_has_item = True
+        if word_rtf_paths:
+            act_convert_pdf = menu.addAction("转换为 PDF")
             group1_has_item = True
         if is_sas:
             act_sas_eg = menu.addAction("用 SAS EG 打开")
@@ -7747,7 +10825,7 @@ class QtMainWindow(QMainWindow):
         act_copy_files = menu.addAction("复制选中文件")
         group2_has_item = True
 
-        # 第 3 组：删除/修改类（末尾）
+        # 第 3 组：修改类（3a 粘贴 → 3b 文件 → 3c 文件夹 → 3d 视图）
         target_dir = path if os.path.isdir(path) else os.path.dirname(path)
         if target_dir and os.path.isdir(target_dir) and self._check_clipboard_has_files():
             act_paste = menu.addAction("粘贴")
@@ -7755,21 +10833,42 @@ class QtMainWindow(QMainWindow):
         if is_file:
             act_rename_file = menu.addAction("重命名")
             act_delete_files = menu.addAction("删除选中文件")
+        if is_folder and typ != "documentations_root":
+            act_new_folder = menu.addAction("新建文件夹…")
+            act_new_folder.setData((path, typ))
+        if is_folder and self._is_mutable_folder(path, typ):
+            act_rename_folder = menu.addAction("重命名文件夹…")
+            act_delete_folders = menu.addAction("删除文件夹")
         if is_folder:
             act_refresh_folder = menu.addAction("刷新")
             act_refresh_folder.setData(path)
             act_sort_by_time = menu.addAction("按时间排序查看文件")
             act_sort_by_time.setData(path)
-        group3_has_item = any([act_paste, act_rename_file, act_delete_files, act_refresh_folder, act_sort_by_time])
+        group3_subgroups = [
+            [act_paste],
+            [act_rename_file, act_delete_files],
+            [act_new_folder, act_rename_folder, act_delete_folders],
+            [act_refresh_folder, act_sort_by_time],
+        ]
+        group3_has_item = any(a for sg in group3_subgroups for a in sg if a)
 
         # 分组分隔线（仅在相邻分组均有项时显示）
         if group1_has_item and group2_has_item:
             menu.insertSeparator(act_copy_path)
         if group2_has_item and group3_has_item:
-            first_group3 = next((a for a in [act_paste, act_rename_file, act_delete_files, act_refresh_folder, act_sort_by_time] if a), None)
+            first_group3 = next((a for sg in group3_subgroups for a in sg if a), None)
             if first_group3:
                 menu.insertSeparator(first_group3)
+        prev_subgroup = False
+        for sg in group3_subgroups:
+            actions = [a for a in sg if a]
+            if not actions:
+                continue
+            if prev_subgroup:
+                menu.insertSeparator(actions[0])
+            prev_subgroup = True
 
+        _style_pfn_context_menu(menu)
         act = menu.exec(self.tree.viewport().mapToGlobal(pos))
         if act_open_selected and act == act_open_selected:
             # 若是多选：逐个按系统默认方式打开；若是单选：按双击逻辑打开
@@ -7829,8 +10928,14 @@ class QtMainWindow(QMainWindow):
             self._rename_file(path)
         elif act_delete_files and act == act_delete_files:
             self._delete_selected_files()
+        elif act_rename_folder and act == act_rename_folder:
+            self._rename_folder(path, item)
+        elif act_delete_folders and act == act_delete_folders:
+            self._delete_selected_folders()
         elif act_paste and act == act_paste:
             self._paste_files_to_folder(act_paste.data())
+        elif act_new_folder and act == act_new_folder:
+            self._create_new_folder_under(path, item)
         elif act_refresh_folder and act == act_refresh_folder:
             self._refresh_folder_node(act_refresh_folder.data(), item)
         elif act_sort_by_time and act == act_sort_by_time:
@@ -7892,6 +10997,224 @@ class QtMainWindow(QMainWindow):
         elif act_default_vscode and act == act_default_vscode:
             self.core.config.set_sas_open(default_app="vscode")
             self.statusBar().showMessage("默认打开方式已设为 VS Code，生效于本次及之后打开", 3000)
+        elif act_convert_pdf and act == act_convert_pdf:
+            self._start_word_rtf_to_pdf_conversion(word_rtf_paths)
+
+    def _validate_fs_name(self, name: str) -> Optional[str]:
+        """校验文件/文件夹名称，合法返回 None，否则返回错误提示。"""
+        name = (name or "").strip()
+        if not name:
+            return "名称不能为空。"
+        invalid_chars = set('<>:"/\\|?*')
+        if any(ch in invalid_chars for ch in name):
+            return "名称包含非法字符：<>:\"/\\|?*"
+        if name.endswith(".") or name.endswith(" "):
+            return "名称不能以“.”或空格结尾。"
+        return None
+
+    def _is_mutable_folder(self, path, typ) -> bool:
+        """是否为用户可删改的子文件夹（typ=dir，非项目固定结构目录）。"""
+        if typ != "dir":
+            return False
+        if not path or not isinstance(path, str):
+            return False
+        folder_path = os.path.normpath(path).replace("/", "\\")
+        if not os.path.isdir(folder_path):
+            return False
+        if not self.current_fav:
+            return False
+        base = os.path.normpath(self.current_fav.get("full_path", "")).replace("/", "\\")
+        if not base:
+            return False
+        try:
+            if os.path.normcase(folder_path) == os.path.normcase(base):
+                return False
+        except Exception:
+            return False
+        return True
+
+    def _prune_fs_expanded_paths(self, paths):
+        """从 fs_expanded 中移除指定路径及其子路径。"""
+        if not self.current_fav or not paths:
+            return
+        pid = self.current_fav["id"]
+        s = self.core.fs_expanded.get(pid, set())
+        if not s:
+            return
+        prefixes = []
+        for p in paths:
+            if not p:
+                continue
+            prefixes.append(os.path.normcase(os.path.normpath(str(p)).replace("/", "\\")))
+        if not prefixes:
+            return
+        to_remove = set()
+        for ep in s:
+            epc = os.path.normcase(ep)
+            for pfx in prefixes:
+                if epc == pfx or epc.startswith(pfx + "\\"):
+                    to_remove.add(ep)
+                    break
+        if to_remove:
+            s -= to_remove
+            self.core.fs_expanded[pid] = s
+
+    def _rename_fs_expanded_prefix(self, old_path: str, new_path: str):
+        """重命名文件夹后，同步更新 fs_expanded 中的路径前缀。"""
+        if not self.current_fav:
+            return
+        old_path = os.path.normpath(old_path).replace("/", "\\")
+        new_path = os.path.normpath(new_path).replace("/", "\\")
+        pid = self.current_fav["id"]
+        s = self.core.fs_expanded.get(pid, set())
+        if not s:
+            return
+        old_c = os.path.normcase(old_path)
+        updated = set()
+        changed = False
+        for ep in s:
+            epc = os.path.normcase(ep)
+            if epc == old_c:
+                updated.add(new_path)
+                changed = True
+            elif epc.startswith(old_c + "\\"):
+                try:
+                    rel = os.path.relpath(ep, old_path)
+                    updated.add(os.path.normpath(os.path.join(new_path, rel)).replace("/", "\\"))
+                    changed = True
+                except ValueError:
+                    updated.add(ep)
+            else:
+                updated.add(ep)
+        if changed:
+            self.core.fs_expanded[pid] = updated
+
+    def _rename_folder(self, folder_path: str, item: QTreeWidgetItem):
+        """重命名用户可管理的子文件夹。"""
+        folder_path = os.path.normpath(folder_path).replace("/", "\\")
+        typ = item.data(1, Qt.ItemDataRole.UserRole) if item else None
+        if not self._is_mutable_folder(folder_path, typ):
+            QMessageBox.information(self, "重命名文件夹", "该项目固定目录不可重命名。")
+            return
+        old_name = os.path.basename(folder_path)
+        new_name, ok = QInputDialog.getText(self, "重命名文件夹", "请输入新文件夹名称：", text=old_name)
+        if not ok:
+            return
+        new_name = (new_name or "").strip()
+        if new_name == old_name:
+            return
+        err = self._validate_fs_name(new_name)
+        if err:
+            QMessageBox.warning(self, "重命名文件夹", err)
+            return
+        new_path = os.path.normpath(os.path.join(os.path.dirname(folder_path), new_name)).replace("/", "\\")
+        if os.path.exists(new_path):
+            QMessageBox.warning(self, "重命名文件夹", "目标文件夹已存在，请更换名称。")
+            return
+        try:
+            os.rename(folder_path, new_path)
+            self._rename_fs_expanded_prefix(folder_path, new_path)
+            self.statusBar().showMessage(f"已重命名文件夹：{new_name}", 3000)
+            if self.current_fav:
+                try:
+                    self._refresh_folders_for_paths([new_path])
+                except Exception:
+                    pass
+        except Exception as e:
+            QMessageBox.critical(self, "重命名文件夹", str(e))
+
+    def _delete_selected_folders(self):
+        """删除选中的用户可管理子文件夹（递归删除）。"""
+        selected = self.tree.selectedItems()
+        folder_paths = []
+        for it in selected:
+            p = it.data(0, Qt.ItemDataRole.UserRole)
+            t = it.data(1, Qt.ItemDataRole.UserRole)
+            if p and isinstance(p, str) and self._is_mutable_folder(p, t):
+                p = os.path.normpath(p).replace("/", "\\")
+                if p not in folder_paths and os.path.isdir(p):
+                    folder_paths.append(p)
+        if not folder_paths:
+            QMessageBox.information(self, "提示", "请选择可删除的子文件夹（项目固定目录不可删除）。")
+            return
+        names_preview = "\n".join(os.path.basename(p) for p in folder_paths[:10])
+        if len(folder_paths) > 10:
+            names_preview += f"\n… 共 {len(folder_paths)} 个文件夹"
+        r = QMessageBox.question(
+            self,
+            "确认删除文件夹",
+            f"确定要递归删除以下文件夹及其全部内容吗？\n\n{names_preview}",
+            QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No,
+            QMessageBox.StandardButton.No,
+        )
+        if r != QMessageBox.StandardButton.Yes:
+            return
+        success = 0
+        failed = []
+        deleted_paths = []
+        for p in folder_paths:
+            try:
+                shutil.rmtree(p)
+                success += 1
+                deleted_paths.append(p)
+            except Exception as e:
+                failed.append(f"{os.path.basename(p)}: {e}")
+        self._prune_fs_expanded_paths(deleted_paths)
+        msg = f"删除完成。成功：{success} 个" + (f"，失败：{len(failed)} 个" if failed else "。")
+        if failed:
+            msg += "\n失败：\n" + "\n".join(failed[:15])
+        self.statusBar().showMessage(msg, 5000)
+        QMessageBox.information(self, "删除文件夹", msg)
+        if self.current_fav and deleted_paths:
+            try:
+                self._refresh_folders_for_paths(deleted_paths)
+            except Exception:
+                pass
+
+    def _create_new_folder_under(self, folder_path: str, item: QTreeWidgetItem):
+        folder_path = os.path.normpath(str(folder_path or "")).replace("/", "\\")
+        if not folder_path or not os.path.isdir(folder_path):
+            QMessageBox.warning(self, "新建文件夹", "目标不是有效文件夹或无法访问。")
+            return
+        # users 下自定义 documentation 下拉：不支持创建文件夹
+        try:
+            node_typ = item.data(1, Qt.ItemDataRole.UserRole)
+            if node_typ == "documentations_root":
+                QMessageBox.information(self, "新建文件夹", "该位置不支持新建文件夹。")
+                return
+        except Exception:
+            pass
+        name, ok = QInputDialog.getText(self, "新建文件夹", f"在以下位置创建子文件夹：\n{folder_path}\n\n文件夹名称：")
+        if not ok:
+            return
+        name = str(name or "").strip()
+        if not name:
+            return
+        err = self._validate_fs_name(name)
+        if err:
+            QMessageBox.warning(self, "新建文件夹", err)
+            return
+        new_path = os.path.normpath(os.path.join(folder_path, name)).replace("/", "\\")
+        if os.path.exists(new_path):
+            QMessageBox.information(self, "新建文件夹", "同名文件夹已存在。")
+            return
+        try:
+            os.makedirs(new_path, exist_ok=False)
+        except PermissionError:
+            QMessageBox.warning(self, "新建文件夹", "权限不足，无法创建文件夹。")
+            return
+        except Exception as e:
+            QMessageBox.warning(self, "新建文件夹", f"创建失败：{e}")
+            return
+        try:
+            self.statusBar().showMessage(f"已创建文件夹：{name}", 2500)
+        except Exception:
+            pass
+        # 刷新当前节点，确保新建文件夹显示出来（不自动选中）
+        try:
+            self._refresh_folder_node(folder_path, item)
+        except Exception:
+            pass
 
     def _set_clipboard_files_win(self, file_paths):
         """将文件路径以 CF_HDROP 格式写入系统剪贴板，使资源管理器或本工具中「粘贴」可复制文件。仅 Windows。"""
@@ -8066,6 +11389,7 @@ class QtMainWindow(QMainWindow):
             return
         success = 0
         fail_list = []
+        success_dests = []
         for src in paths:
             try:
                 name = os.path.basename(src)
@@ -8078,6 +11402,7 @@ class QtMainWindow(QMainWindow):
                     dest = os.path.join(target_dir, f"{base}_{n}{ext}")
                 shutil.copy2(src, dest)
                 success += 1
+                success_dests.append(os.path.normpath(dest).replace("/", "\\"))
             except Exception as e:
                 fail_list.append(f"{os.path.basename(src)}: {e}")
         msg = f"粘贴完成。成功：{success} 个" + (f"，失败：{len(fail_list)} 个" if fail_list else "。")
@@ -8088,7 +11413,14 @@ class QtMainWindow(QMainWindow):
         self.statusBar().showMessage(msg, 5000)
         QMessageBox.information(self, "粘贴结果", msg)
         if success > 0 and self.current_fav:
-            self._refresh_tree()
+            node = self._find_folder_tree_item(target_dir)
+            if node is not None:
+                self._refresh_folder_node(target_dir, node)
+            else:
+                try:
+                    self._refresh_folders_for_paths(success_dests or [os.path.join(target_dir, "_")])
+                except Exception:
+                    self._refresh_tree()
 
     def _delete_selected_files(self):
         """删除右侧文件树中选中的文件（仅 file 类型），操作前确认，删除后刷新当前项目。"""
@@ -8118,10 +11450,12 @@ class QtMainWindow(QMainWindow):
             return
         success = 0
         failed = []
+        deleted_paths = []
         for p in file_paths:
             try:
                 os.remove(p)
                 success += 1
+                deleted_paths.append(p)
             except Exception as e:
                 failed.append(f"{os.path.basename(p)}: {e}")
         msg = f"删除完成。成功：{success} 个" + (f"，失败：{len(failed)} 个" if failed else "。")
@@ -8129,8 +11463,11 @@ class QtMainWindow(QMainWindow):
             msg += "\n失败：\n" + "\n".join(failed[:15])
         self.statusBar().showMessage(msg, 5000)
         QMessageBox.information(self, "删除结果", msg)
-        if self.current_fav:
-            self._refresh_tree()
+        if self.current_fav and deleted_paths:
+            try:
+                self._refresh_folders_for_paths(deleted_paths)
+            except Exception:
+                pass
 
     def _rename_file(self, file_path):
         """重命名单个文件并刷新当前项目树。"""
@@ -8143,14 +11480,11 @@ class QtMainWindow(QMainWindow):
         if not ok:
             return
         new_name = (new_name or "").strip()
-        if not new_name:
-            QMessageBox.warning(self, "提示", "文件名不能为空。")
-            return
         if new_name == old_name:
             return
-        invalid_chars = set('<>:"/\\|?*')
-        if any(ch in invalid_chars for ch in new_name):
-            QMessageBox.warning(self, "提示", "文件名包含非法字符：<>:\"/\\|?*")
+        err = self._validate_fs_name(new_name)
+        if err:
+            QMessageBox.warning(self, "提示", err)
             return
         new_path = os.path.join(os.path.dirname(file_path), new_name)
         if os.path.exists(new_path):
@@ -8160,7 +11494,10 @@ class QtMainWindow(QMainWindow):
             os.rename(file_path, new_path)
             self.statusBar().showMessage(f"已重命名为：{new_name}", 3000)
             if self.current_fav:
-                self._refresh_tree()
+                try:
+                    self._refresh_folders_for_paths([new_path])
+                except Exception:
+                    pass
         except Exception as e:
             QMessageBox.critical(self, "重命名失败", str(e))
 
@@ -8195,7 +11532,9 @@ class QtMainWindow(QMainWindow):
         if not os.path.isdir(folder_path):
             QMessageBox.warning(self, "提示", "目标不是有效文件夹或无法访问。")
             return
-        is_docs_root = (item.data(1, Qt.ItemDataRole.UserRole) == "docs_root")
+        node_typ = item.data(1, Qt.ItemDataRole.UserRole)
+        is_docs_root = node_typ == "docs_root"
+        is_documentations_root = node_typ == "documentations_root"
         while item.childCount():
             item.removeChild(item.child(0))
         loading = QTreeWidgetItem(["加载中…", ""])
@@ -8220,6 +11559,12 @@ class QtMainWindow(QMainWindow):
                 # Documents 节点刷新：仅展示全部 xlsx 文件（不展示其它后缀与子目录）。
                 if is_docs_root:
                     if is_dir or not n.lower().endswith(".xlsx"):
+                        continue
+                    result.append((n, p, False))
+                    continue
+                # users 下 Documents（documentations_root）：仅展示该目录下的文件（不展示子目录）。
+                if is_documentations_root:
+                    if is_dir:
                         continue
                     result.append((n, p, False))
                     continue
@@ -8517,7 +11862,7 @@ class ProjectSelector(QDialog):
                 return None
             item = found
         self.tree.setCurrentItem(item)
-        self.tree.scrollToItem(item)
+        self.tree.scrollToItem(item, QAbstractItemView.ScrollHint.PositionAtTop)
         return item
 
     def _position_search_list(self):
@@ -8575,9 +11920,15 @@ class ProjectSelector(QDialog):
         q_raw = (text or "").strip().lower()
 
         def _sort_key(row):
-            tier_t = self._search_match_rank(q, q_raw, row[1], row[0])
-            _, _, sk = _pfn_product_search_source_meta(row[1])
-            return (tier_t[0], sk, tier_t[1])
+            flat, p, _it = row
+            tier_t = self._search_match_rank(q, q_raw, p, flat)
+            _, _, sk = _pfn_product_search_source_meta(p)
+            base = os.path.basename((p or "").rstrip("\\"))
+            nbase = self._normalize_search_text(base)
+            # 同层级命中时：文件夹名以关键词结尾（如搜 5965 → HRS5965）优先于仅路径中部命中
+            suffix = 0 if (q and nbase.endswith(q)) else 1
+            exact = 0 if (q and nbase == q) else 1
+            return (tier_t[0], sk, suffix, exact, len(nbase), tier_t[1])
 
         matches.sort(key=_sort_key)
         matches = matches[:200]
@@ -8626,6 +11977,7 @@ class ProjectSelector(QDialog):
             self.search_list.setItemWidget(it, row_w)
         self._position_search_list()
         self.search_list.setCurrentRow(0)
+        self.search_list.scrollToTop()
         self.search_list.show()
 
     def _on_search_item_clicked(self, item):
@@ -8640,7 +11992,7 @@ class ProjectSelector(QDialog):
                 cur.setExpanded(True)
                 cur = cur.parent()
             self.tree.setCurrentItem(tree_item)
-            self.tree.scrollToItem(tree_item)
+            self.tree.scrollToItem(tree_item, QAbstractItemView.ScrollHint.PositionAtTop)
         elif path:
             self._scroll_tree_to_path(path)
 

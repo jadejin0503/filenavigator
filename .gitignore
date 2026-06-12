@@ -23,3 +23,6 @@ main.spec
 
 # Cursor local skill cache (repo-specific rules can still be committed)
 /.cursor/skills/
+
+# Brainstorming visual companion (local mockups/state)
+/.superpowers/
