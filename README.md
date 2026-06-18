@@ -1,6 +1,6 @@
 # PFN — 临床试验项目导航工具
 
-基于 PyQt6 的桌面应用，用于在 **Z 盘网络路径** 下管理临床试验项目、快速浏览文件结构，并与 **SAS Enterprise Guide**、**VS Code** 等工具联动打开代码与文档。
+基于 **PyQt6** 的 Windows 桌面应用，用于在 **Z 盘网络路径** 下管理临床试验项目、浏览归类后的文件结构，并与 **SAS Enterprise Guide**、**VS Code** 等工具联动；同时提供 **项目待办 / 个人待办**、**关键时间节点**、**项目数据分析** 与 **工作台** 等一体化能力。
 
 ---
 
@@ -8,16 +8,35 @@
 
 | 模块 | 说明 |
 |------|------|
-| **项目管理栏** | 左侧树：按 projects / unblinded / users 分类；支持「产品 → 试验 → 子目录」层级、搜索定位、添加/删除、打开所在文件夹；标题区可切回待办/分析。 |
-| **右侧视图** | 无左侧选中：显示「我的待办 / 项目数据分析」；有选中且可解析为收藏目录：显示文件树。见下文「归类规则」。 |
-| **右侧文件树** | 对**收藏项**（`config` 中有对应记录）展示按项目类型归类的聚合目录；支持双击/右键打开、显示修改时间；**.doc/.docx/.rtf** 可多选后右键「转换为 PDF」（同目录生成独立 PDF，需本机安装 Microsoft Word）；**可将选中文件或文件夹拖出窗口**，拖到桌面或资源管理器等位置，由系统完成复制/移动。 |
-| **添加项目** | 对话框支持三目录（projects / unblinded / users）按**产品**搜索与快速定位；**搜索结果优先展示「文件夹名以关键词结尾」等更相关项**，下拉列表与树定位时**将匹配项滚到可视区域顶部**；可多选目录并自动解析为产品/试验加入收藏；支持覆盖/跳过已存在路径。 |
-| **SAS EG 集成** | .sas 与 SAS 数据集（.sas7bdat/.sas7bndx/.sas7bcat/.sd2）差异化打开：`.sas` 走 EG 自动化展开；数据集直接调用 `SEGuide.exe` 传参打开。 |
-| **代码/文档打开** | `.sas` 保留 SAS EG / VS Code；SAS 数据集仅 SAS EG；PDF 可选默认查看器。 |
-| **Utility 公共目录** | 左侧固定入口，点击后在右侧展示 `Z:\projects\utility` 目录树。 |
-| **工作台（工具入口）** | 项目管理页内置工作台卡片（如 PDTManager/QCT_Tools/RTFtoPDF），启动时按规则扫描固定目录并选择最新 exe。 |
-| **配置与规则** | 配置文件 `config.json`（自动创建、带回退优先级）；内置匹配规则（aCRF、protocol、SAP、shell、顶线、setup 等）可扩展。 |
-| **单文件分发** | Windows 打包产物为单文件 `PFN.exe`（PyInstaller onefile），可复制到任意路径运行；任务栏图标优先读取同目录 `icon.ico`，无则回退内嵌/PE 图标。 |
+| **项目管理栏** | 左侧树：置顶项目、`projects` / `unblinded` / `users` 分类；产品 → 试验 → 子目录层级；搜索定位、添加/删除、右键设置 TA/状态、置顶；标题区可切回项目管理页。 |
+| **右侧视图切换** | 无左侧选中：显示项目管理四标签页；有选中且可浏览：显示归类/扁平文件树。 |
+| **我的待办** | **项目待办**（按产品分组、任务勾选/编辑/附件/折叠）与 **个人待办**（独立任务列表）；支持筛选、产品拖拽排序、从待办隐藏产品/子项目。 |
+| **项目节点** | 按月历展示各子项目 **关键时间节点**（milestones）；按产品/年/月筛选；支持添加、双击/右键编辑与删除节点。 |
+| **项目数据分析** | 项目状态饼图、TA 柱状图、已完成任务趋势折线图；月份/年份筛选联动。 |
+| **工作台** | 固定顺序启动 **PDTManager**、**QCT_Tools**、**RTFtoPDF**：每次点击实时扫描 Z 盘固定目录，匹配最新 `.exe` 并启动。 |
+| **右侧文件树** | 收藏项按项目类型归类聚合；双击/右键打开；**.doc/.docx/.rtf** 可转 PDF；支持拖出到桌面/资源管理器；**program** 目录仅展示 `.sas`。 |
+| **添加项目** | 三目录懒加载、产品搜索（相关度排序 + 滚到顶部定位）、多选加入收藏。 |
+| **SAS EG 集成** | `.sas` 自动化展开服务器树；SAS 数据集直接传参 `SEGuide.exe`；多选数据集单次打开。 |
+| **任务附件** | 个人/项目任务均支持文件附件；编辑对话框可拖入文件、**Ctrl+V 粘贴截图**（兼容企业微信等 Windows 截图源）。 |
+| **配置与数据** | `config.json` 固定用户目录；附件存于同目录 `PFN_Data/`；崩溃日志 `pfn_crash.log`。 |
+| **单文件分发** | PyInstaller onefile 生成 `PFN.exe`；单实例锁；任务栏图标优先同目录 `icon.ico`。 |
+
+---
+
+## 界面结构
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  左侧「项目管理栏」          │  右侧（无选中时）                    │
+│  · 搜索项目                  │  ┌──────────────────────────────┐ │
+│  · 置顶项目                  │  │ 我的待办 │ 项目节点 │ 数据分析 │ 工作台 │
+│  · projects / unblinded      │  └──────────────────────────────┘ │
+│  · users                     │  （有选中时 → 右侧文件树）          │
+│  · Utility 公共目录          │                                   │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+点击左侧标题「项目管理栏」可取消树选中，右侧回到上述四标签页。
 
 ---
 
@@ -25,86 +44,141 @@
 
 ### 1. 项目管理栏（左侧）
 
-- **分类**：根节点为 `projects`、`unblinded`、`users`（有对应收藏时才显示 users）。
+- **分类**：根节点为 **置顶项目**（若有）、`projects`、`unblinded`、`users`（有对应收藏时才显示 users）。
 - **层级**：
   - **projects / unblinded**：产品 → 试验 → 子目录（叶子为具体收藏路径）。
-  - **users**：先按 `unblinded` / `projects` 分，再按产品 → 试验 → 子目录；仅两层路径时从试验名解析产品前缀（如 `HRS7450_201` → 产品 `HRS7450`），实现与 projects 一致的归类。
-- **操作**：点击「+ 添加项目」从 Z 盘树多选并自动归类；右键节点可「打开所在文件夹」或「删除」产品/试验/子项目；同路径在树中按 `full_path` 去重，避免重复节点。
-- **与右侧联动**：点击左侧标题「项目管理栏」区域可取消树选中，右侧回到「我的待办 / 项目数据分析」；选中某条**可浏览**的节点时，右侧切换到文件树视图。
+  - **users**：先按 `unblinded` / `projects` 分，再按产品 → 试验 → 子目录；两层路径时从试验名解析产品前缀（如 `HRS7450_201` → `HRS7450`）。
+- **搜索**：顶部输入框实时搜索收藏项目，选择后高亮左侧树并定位右侧目录。
+- **置顶**：试验节点右键可「添加到置顶」/「取消置顶」，置顶区显示在树最上方。
+- **试验节点右键**：设置项目状态（未完成/已完成）、**编辑项目任务**、设置 TA（产品节点）、删除、打开所在文件夹等。
+- **操作**：「+ 添加项目」从 Z 盘多选并自动归类；同路径按 `full_path` 去重。
 
-### 2. 右侧视图与归类规则（重要）
+### 2. 右侧视图与归类规则
 
-- **两视图切换**：
-  - **无选中**：右侧默认显示 **「我的待办」** 与 **「项目数据分析」** 两个标签页（项目管理、任务与图表）。
-  - **有选中**：右侧切换到 **文件树**，展示当前节点对应目录下的内容（见下）。
-- **收藏项 vs 普通目录**（决定右侧是「归类树」还是「扁平资源管理器」）：
-  - 若选中节点对应 **`config.json` 里的一条收藏**（叶子 / 试验 / 父分组 / 置顶解析出的收藏），且路径有效，则使用**内置归类布局**（与早期版本一致）。
-  - 若仅选中**没有对应收藏记录的**物理目录（例如仅展开到产品根、`Z:\projects` 等），则使用**扁平目录树**（懒加载展开，类似资源管理器）。
-- **projects / unblinded**：归类树包含 **data、M5、program、reports、protocol、data_management、statistics、review_comments、logs、util、Documents** 等聚合节点；`program` 下为 `06_programs` / `09_validation`（界面显示为 programs / validation）；`util` 下为 `utility/macros`、`utility/metadata`、`utility/tools`（显示为 macros / metadata / tools）。
-- **users**：归类树**仅**包含 **program** 与 **util** 两棵聚合（同样基于上述相对路径），**不**包含 M5、Documents 等整块，结构更精简。
-- **program 与 Documents**：规则见下节；与 `dir_type` 为 `projects` / `unblinded` / `users` 时的展示策略一致。
+- **两页切换**（`QStackedWidget`）：
+  - **页 0 — 项目管理**：四个标签（见下文 §3–§6）。
+  - **页 1 — 文件树**：选中左侧可浏览节点时显示。
+- **收藏项 vs 普通目录**：
+  - 选中节点能对应 **`config.json` 中的收藏项**且路径有效 → **内置归类布局**。
+  - 仅物理目录、无收藏记录 → **扁平懒加载目录树**（类似资源管理器）。
+- **projects / unblinded 归类树**：`data`、`M5`、`program`（`06_programs` / `09_validation`）、`reports`、`protocol`、`data_management`、`statistics`、`review_comments`、`logs`、`util`、`Documents` 等。
+- **users 归类树**：仅 **program** 与 **util** 两棵聚合，结构更精简。
+- **program 过滤**：仅展示 `.sas` 程序文件。
+- **Documents**：初次展开显示常用 xlsx；刷新后展示全部 xlsx。
+- **拖出**：多选文件/文件夹可拖出窗口至桌面或资源管理器，行为与系统一致。
 
-### 3. 右侧文件树（数据来源与细节）
+### 3. 我的待办
 
-- **数据来源**：对**收藏项**选中后，根据项目路径与 `config` 中的 **match_rules**、**fixed_paths** 聚合展示。
-- **projects / unblinded**：展示 M5、program、protocol、data_management、statistics、review_comments、util 等聚合节点；每个节点对应项目下的相对路径（如 `06_programs`、`utility/documentation/01_protocol`）；部分节点下为规则匹配到的文档（如 aCRF、protocol、SAP、shell、顶线、setup、SDTM_PDS 等）。
-- **users**：展示 program、util 等聚合节点（无 M5），结构更精简。
-- **固定路径**：如 `07_logs`、各 documentation 子路径等，可在配置中调整；`07_logs` 下可展开显示 .xml 文件及修改时间。
-- **program 聚合过滤**：`program`（`06_programs` / `09_validation`）目录树内仅展示 `.sas` 程序文件，隐藏 `.lst`、`.txt` 等非 SAS 文件。
-- **Documents 展示策略**：初次展开仅显示“常用 xlsx”；对 `Documents` 节点执行刷新后，切换为展示该目录下“全部 xlsx”。
-- **列**：第一列为名称，第二列为修改时间（右对齐、灰色）。
-- **拖放到系统文件夹**：在右侧文件树中可多选本地存在的文件或文件夹，按住左键拖出应用窗口，可放到桌面、资源管理器其它目录或支持文件拖放的应用中；松手后的复制/移动与系统资源管理器行为一致（单文件拖拽时沿用界面同款文件图标作为拖拽缩略图）。
+内含两个子标签：**项目待办**、**个人待办**。顶部筛选：显示全部 / 仅未完成 / 仅已完成（项目与个人分别记忆）。
 
-### 4. 添加项目
+#### 项目待办
 
-- 对话框从 **Z 盘根** 懒加载：先显示 projects / unblinded / users，展开后加载子目录。
-- **users** 下展开到 userid 后显示 `projects`、`unblinded`，再进入具体路径。
-- **产品搜索**：
-  - 输入关键词后，下拉结果在「命中强弱、来源（projects / unblinded / users）」排序基础上，**优先将「规范化后的产品文件夹名以关键词结尾」的项排在前面**（例如搜 `5965` 时更易将 `HRS5965` 排在列表前部），再辅以完全匹配、名称长度与字母序。
-  - 每次刷新下拉列表后会**滚回列表顶部**，保证当前最优匹配（第 1 条）出现在可视区域最上方。
-  - 从下拉选择或回车确认跳转后，右侧树会**将目标节点滚到可视区域顶部**（`PositionAtTop`），避免仅「保证可见」而把高亮项挤在视口最下方。
-- 多选目录后，按路径解析为「产品 → 试验 → 子目录」并写入收藏；可选覆盖已存在路径。
-- 支持 Z 盘路径如 `Z:\projects\...`、`Z:\users\userid\unblinded\...` 等。
+- 数据来自 `config.json` → `project_management.subprojects` 中各子项目的 `tasks`。
+- 按 **产品** 分组展示，产品标题可点击折叠/展开（带动画）；产品顺序支持 **拖拽排序** 并持久化。
+- 子项目下展示任务行：勾选完成、优先级、截止日期高亮（临期/逾期）、附件图标（图片缩略/文件列表）。
+- **编辑任务**：内容、附件（拖入 / 选择文件 / **Ctrl+V 粘贴截图**）、优先级、截止日期、完成状态。
+- 子项目标题右键：跳转收藏库、**编辑时间节点**、从待办移除子项目；产品标题右键：从待办移除整个产品。
+- 首次使用需在左侧试验节点右键 **「编辑项目任务」** 添加任务后才会出现在此页。
 
-### 5. SAS EG 打开（代码/数据集差异化）
+#### 个人待办
 
-- **`.sas` 代码文件**：
-  - 右键支持 `SAS EG` 与 `VS Code`；
-  - 选择 `SAS EG` 时执行自动化：新开 EG → 展开「服务器 → SASApp → 文件」→ 定位路径并打开；
-  - 适用于 projects / users 路径，仍保留原自动化兜底逻辑。
-- **SAS 数据集文件**（`.sas7bdat/.sas7bndx/.sas7bcat/.sd2`）：
-  - 右键仅保留 `用 SAS EG 打开`（无 VS Code）；
-  - 不做 UI 自动化、不展开服务器树；
-  - 直接调用 `_find_sas_eg()` 定位 `SEGuide.exe`，再 `subprocess.Popen([seguide_path] + data_paths)` 一次性传入多文件。
-- **多选行为**：多选数据集时单次调用 EG 并传入全部路径，目标效果与资源管理器右键“使用 SAS Enterprise Guide 打开”一致，尽量在同一 EG 窗口加载。
+- 数据来自 `config.json` → `personal_tasks`，与具体试验路径无关。
+- 支持添加 / 编辑 / 删除个人任务，字段与项目任务编辑对话框一致。
+- 附件保存在 `%USERPROFILE%\PFN_Config\PFN_Data\personal_task_attachments\{task_id}\`。
 
-### 6. 其他文件打开
+### 4. 项目节点
 
-- **PDF**：双击可弹窗选择打开方式（如系统默认、Adobe 等）。
-- **Excel / 其他**：通过系统关联或 ShellExecute 打开。
-- **打开所在文件夹**：收藏/文件节点右键「打开所在文件夹」；优先复用已打开的资源管理器窗口并定位到路径或选中文件。
+- 汇总各子项目在配置中维护的 **milestones**（名称 + 日期），以 **月历** 形式展示。
+- 顶部筛选：**产品**、**年份**、**月份**。
+- 日历格内为时间节点 chip：双击或右键可编辑/删除；支持为子项目 **添加新节点**。
+- 与「我的待办」共用隐藏规则：已从待办移除的产品/子项目不在此显示。
 
-#### setup.xlsx（编辑版 / 参考版双开）
+### 5. 项目数据分析
 
-用于在同一项目下**先编辑、再对照**两份 Setup，且避免 Excel 对**同一原文件路径**重复打开时出现「同名无法打开」等问题。
+- **项目状态分布**（饼图）：点击扇区可查看对应子项目列表。
+- **项目 TA 分布**（柱状图）：点击柱可筛选。
+- **已完成任务趋势**（折线图，按月）：受顶部 **月份**、**年份** 筛选联动。
+- 数据来源：`project_management` 中子项目状态、TA、任务完成时间等。
 
-| 操作 | 行为 |
+### 6. 工作台
+
+固定三个工具卡片，顺序不可变：
+
+| 工具 | 扫描目录 | 文件名关键字 |
+|------|----------|--------------|
+| PDTManager | `Z:\projects\Z_PYTHON\PDT` | `PDTManager` |
+| QCT_Tools | `Z:\projects\Z_PYTHON\QCT_Tools` | `QCT` |
+| RTFtoPDF | `Z:\projects\Z_PYTHON\rtf_to_pdf` | `RTFtoPDF` |
+
+- **每次点击**在后台线程重新扫描目录，取 **mtime 最新** 的 `.exe` 并启动（不缓存路径到界面）。
+- 找不到或启动失败时弹出友好提示，不导致程序崩溃。
+- 卡片展示使用系统内置图标（避免从网络盘 exe 解析图标卡顿）；启动仍使用真实 exe。
+
+### 7. 右侧文件树（补充）
+
+- 列：名称、修改时间（右对齐）。
+- **转换为 PDF**：多选 `.doc` / `.docx` / `.rtf` 后右键转换，在同目录生成独立 PDF（需本机安装 **Microsoft Word**）；显示进度并可取消。
+- **打开所在文件夹**：优先复用已打开的资源管理器窗口并定位路径或选中文件。
+
+### 8. 添加项目
+
+- 从 **Z 盘根** 懒加载：`projects` / `unblinded` / `users`；users 下展开到 userid 后再进 `projects` / `unblinded`。
+- **产品搜索**：下拉结果优先「文件夹名以关键词结尾」等更相关项；列表滚回顶部；跳转后树节点 `PositionAtTop`。
+- 多选目录后解析为「产品 → 试验 → 子目录」写入收藏；支持覆盖已存在路径。
+
+### 9. SAS EG 打开
+
+| 类型 | 行为 |
 |------|------|
-| **第一次打开**（当前 Excel 里**还没有**任何名为 `setup.xlsx` 的工作簿） | 直接打开**网络盘上的原文件**（可编辑）。 |
-| **第二次打开**（Excel 里**已经有一份** `setup.xlsx` 打开——**包括先开了项目 A 的 setup，再点项目 B 的 setup**，文件名相同即算） | **不再**从网络路径直接再打开 `setup.xlsx`（否则会触发 Excel「无法同时打开两个同名工作簿」）；将**当前点击**的那份原文件复制到本机临时目录 **`%TEMP%\PFN_Reference\`**，文件名为 **`{项目名称}_Setup_参考版.xlsx`**（项目名称优先取项目管理配置中的子项目名称 `subproject_name`，否则使用路径解析出的试验目录名如 `SHRxxxx_xxx`），**覆盖**同名旧文件后，用 Excel 打开该临时副本。 |
+| **`.sas`** | 右键 SAS EG / VS Code；EG 走自动化：展开 Server → SASApp → 文件并打开 |
+| **数据集**（`.sas7bdat` 等） | 仅 SAS EG；直接 `SEGuide.exe` 传参，无 UI 自动化 |
+| **多选数据集** | 单次调用 EG 传入全部路径 |
 
-**实现要点（与代码一致）**
+自动化依赖 **pywinauto**；未安装时降级为传参启动（可能出现编码问题）。
 
-- 每次点击都重新判断：通过 **pywin32 / win32com** 连接已运行的 Excel，检查是否已有任意 **`setup.xlsx` 工作簿**（按文件名，不限是否同一路径）；未安装或 COM 失败时，用「**当前点击路径**文件独占读是否失败」作为弱兜底（无法可靠处理「已开 A 再开 B」的跨目录同名，**强烈建议安装 pywin32**）。
-- **不**使用「第几次点击」的进程内缓存；关闭 Excel 或重启工具后，行为仍由「原文件当前是否已在 Excel 中打开」决定。
-- 参考版与项目数据**不同目录**，仅临时文件；建议在环境中安装 **pywin32** 以获得稳定的「是否已打开」判断。
+### 10. 其他文件打开
 
-### 7. 配置
+- **PDF**：双击可选打开方式。
+- **Excel / 其他**：系统关联或 ShellExecute。
+- **setup.xlsx 双开策略**：
+  - Excel 中尚无名为 `setup.xlsx` 的工作簿 → 直接打开网络原文件。
+  - 已有同名工作簿打开 → 复制到 `%TEMP%\PFN_Reference\{项目名}_Setup_参考版.xlsx` 再打开副本。
+  - 建议安装 **pywin32** 以可靠检测 Excel 中是否已打开同名文件。
 
-- **统一位置（开发与打包一致）**：`config.json` 固定为 **`%USERPROFILE%\PFN_Config\config.json`**（在默认用户目录布局下即 **`C:\Users\<当前 Windows 登录名>\PFN_Config\config.json`**）。收藏、待办、`project_management`、个人待办附件元数据等均读写此文件；个人待办附件文件在同目录下的 **`PFN_Data\personal_task_attachments\`**。
-- **版本升级**：更换或移动 `PFN.exe` 不影响上述路径中的数据；只要在同一 Windows 用户下运行，即沿用同一配置。
-- **从旧版迁移**：若你曾在 **exe 旁** 或 **项目目录** 使用过另一份 `config.json`，请将该文件（及同目录 **`PFN_Data`** 文件夹，若有）**复制到** `%USERPROFILE%\PFN_Config\`，覆盖或合并后再启动新版本。
-- **内容**：`favorite_projects`（收藏列表）、`match_rules`（文档匹配规则）、`fixed_paths`（右侧固定展示路径）、`sas_open`（.sas 默认打开方式及编码）、`personal_tasks`、`project_management` 等。
+### 11. 配置与数据目录
+
+#### config.json（固定用户目录）
+
+程序**始终**使用：
+
+`%USERPROFILE%\PFN_Config\config.json`
+
+（一般为 `C:\Users\<登录名>\PFN_Config\config.json`）。首次运行自动创建。更换或移动 `PFN.exe` **不影响**配置路径。
+
+#### 主要配置字段
+
+| 字段 | 说明 |
+|------|------|
+| `favorite_projects` | 收藏列表 |
+| `match_rules` / `fixed_paths` | 右侧归类与文档匹配规则 |
+| `sas_open` | `.sas` 默认打开方式及编码 |
+| `project_management` | 子项目元数据、任务、里程碑、TA、状态等 |
+| `personal_tasks` | 个人待办列表 |
+| `ui_state` | 待办筛选、产品/子项目折叠与隐藏、产品排序等 |
+
+#### 附件与日志
+
+| 路径 | 内容 |
+|------|------|
+| `PFN_Config\PFN_Data\personal_task_attachments\` | 个人任务附件 |
+| `PFN_Config\PFN_Data\project_task_attachments\` | 项目任务附件 |
+| `PFN_Config\pfn_crash.log` | 未捕获异常与 faulthandler 崩溃日志 |
+| `%APPDATA%\PFN\pfn_app.lock` 或 config 同目录 | 单实例锁文件 |
+
+#### 迁移与分发
+
+- 从旧版（exe 旁或项目目录）迁移：将 `config.json` 及 **`PFN_Data`** 文件夹复制到 `%USERPROFILE%\PFN_Config\`。
+- 分发预置配置：同上，放入对方机器的 `PFN_Config` 后启动即可。
 
 ---
 
@@ -112,85 +186,96 @@
 
 ### 环境要求
 
-- **Python 3**（建议 3.10+）
+- **Windows**（主要目标平台）
+- **Python 3.10+**
 - **PyQt6**
-- 可选：**pywin32**（解析 .lnk、SAS EG 路径等）、**pywinauto**（SAS EG 自动化，否则仅传参启动）
+- 可选推荐：**pywin32**（剪贴板文件、Excel COM、快捷方式）、**pywinauto**（SAS EG 自动化）
 
 ### 安装依赖
 
 ```bash
 pip install PyQt6
-# 可选，推荐
 pip install pywin32 pywinauto
 ```
 
 ### 运行
 
 ```bash
-python app_qt.py
+python main.py
 ```
 
-### 打包为单文件 exe（Windows）
+也可直接运行 `python app_qt.py`；Windows 无控制台启动可用 **`PFN_silent.pyw`**。
 
-在项目根目录执行 **`build.bat`**（或 `pyinstaller build.spec`），生成 **`PFN_app\PFN.exe`**：无控制台、单文件可任意路径运行。建议将同目录下的 **`icon.ico`** 一并分发给对方（脚本会自动复制到 `PFN_app\`）。
+**环境变量（调试用）**
 
-### config.json 位置（固定用户目录）
+| 变量 | 作用 |
+|------|------|
+| `PFN_KEEP_CONSOLE=1` | 保留控制台，便于查看 print 与崩溃信息 |
+| `PFN_ICON_DEBUG=1` | 启动时打印图标路径诊断信息 |
 
-程序**始终**使用当前 Windows 用户下的：
+### 打包为单文件 exe
 
-`%USERPROFILE%\PFN_Config\config.json`
+在项目根目录执行 **`build.bat`**（或 `pyinstaller build.spec`），输出 **`PFN_app\PFN.exe`**。建议将 **`icon.ico`** 与 exe 一并分发（任务栏图标优先读取同目录 `icon.ico`）。
 
-（一般为 `C:\Users\<你的登录名>\PFN_Config\config.json`）。首次运行若不存在会自动创建。打包升级 exe **不会**改变该路径，数据与 exe 所在位置无关。
+### 运行测试
 
-- **分发预置配置**：若需给他人一份已有收藏/待办，请将准备好的 **`config.json`**（及同目录 **`PFN_Data`**，若有附件）放入对方机器的 **`%USERPROFILE%\PFN_Config\`**，再启动程序。
-- **`%APPDATA%\PFN\pfn_config_dir.txt`**：打包后仍可能写入，仅作记录 PFN_Config 目录之用；**不再**作为切换配置路径的依据。
+```bash
+python -m unittest discover -s tests -v
+```
 
 ---
 
 ## 项目结构（简要）
 
-| 文件 | 说明 |
-|------|------|
-| `main.py` | 程序入口：AppUserModelID、单实例锁（`pfn_app.lock`）、应用/窗口图标与 Win32 `WM_SETICON` 补强。 |
-| `PFN_silent.pyw` | Windows 静默入口（pythonw/.pyw），避免控制台窗口闪烁。 |
-| `app_qt.py` | 主界面与业务逻辑：收藏树、右侧文件树、添加项目对话框与搜索、SAS EG 自动化、右键菜单等。 |
-| `config_manager.py` | 配置读写：收藏、匹配规则、固定路径、SAS 打开方式；**`config.json` 固定为 `%USERPROFILE%\PFN_Config\config.json`**。 |
-| `zdrive_scanner.py` | Z 盘懒加载扫描：projects/unblinded/users，users 下 userid → projects/unblinded 的 source_id 计算。 |
-| `file_matcher.py` | 按 match_rules 匹配项目文档（aCRF、protocol、SAP、shell、顶线、setup 等）。 |
-| `workbench_launcher.py` | 工作台工具启动辅助：缓存/扫描 exe、Windows 静默启动参数等。 |
-| `icons_pfn.py` | UI 图标绘制/加载（文件夹、勾选等）。 |
-| `build.bat` | Windows 一键构建脚本（ASCII-only），输出 `PFN_app\PFN.exe`。 |
-| `build.spec` | PyInstaller **单文件（onefile）** spec：生成 `PFN.exe`（无控制台），包含 `assets/app_icon.ico`。 |
-| `assets/` | `app_icon.ico`、分发说明 `DISTRIBUTION_zh.txt`、logo 源图等。 |
-| `scripts/build_app_icon_from_png.py` | 从 PNG 生成 ICO（用于构建时同步 `icon.ico`）。 |
-| `tests/test_workbench_launcher.py` | 工作台启动辅助的单元测试。 |
-| `.cursor/rules/` | Cursor 规则：项目约定、工作台约定、UI 负载安全等。 |
-| `SAS_EG_集成与调试说明.md` | SAS EG 集成与调试说明（路径转换、树展开、常见问题）。 |
+| 文件 / 目录 | 说明 |
+|-------------|------|
+| `main.py` | **推荐入口**：崩溃日志、单实例锁、图标、启动主窗口 |
+| `PFN_silent.pyw` | Windows 静默启动（pythonw） |
+| `app_qt.py` | 主界面与业务逻辑（收藏树、待办、节点、分析、工作台、文件树、SAS 等） |
+| `config_manager.py` | 配置读写、待办/附件/项目管理 API |
+| `pfn_crash_log.py` | 全局 excepthook 与 faulthandler，写入 `pfn_crash.log` |
+| `zdrive_scanner.py` | Z 盘懒加载扫描 |
+| `file_matcher.py` | 按 `match_rules` 匹配项目文档 |
+| `workbench_launcher.py` | 工作台 exe 缓存与静默启动辅助 |
+| `icons_pfn.py` | UI 图标绘制/加载 |
+| `build.bat` / `build.spec` | PyInstaller 单文件构建 |
+| `assets/` | `app_icon.ico`、分发说明等 |
+| `tests/` | 单元测试（工作台、待办附件、拖拽、折叠安全等） |
+| `SAS_EG_集成与调试说明.md` | SAS EG 路径、树展开与排错 |
+| `.cursor/rules/` | 开发约定（UI 负载安全、工作台规则等） |
 
 ---
 
 ## 使用提示
 
-1. **Z 盘**：需已映射并可访问；左侧「添加项目」与右侧文件树均依赖 Z 盘路径。
-2. **SAS EG**：自动化需安装 pywinauto；若未安装，双击 .sas 仍可选 SAS EG，但会以降级方式传参启动（可能乱码）。
-3. **默认打开方式**：`.sas` 文件可在右键菜单设置默认打开方式（SAS EG / VS Code）；数据集文件不提供 VS Code。
-4. **多选打开**：Ctrl 多选多个 `.sas`/数据集后右键 `用 SAS EG 打开`；其中数据集会一次性传参提交到 EG。
-5. **收藏去重**：同一路径在收藏树中只显示一次；若配置中误重复，界面展示时会按 `full_path` 去重。
-6. **拖出文件**：在「项目管理」右侧文件树中选中文件或文件夹后，可拖出窗口到桌面或资源管理器完成复制/移动（多选时一并拖出）。
-7. **添加项目搜索**：产品搜索下拉会优先展示「文件夹名以关键词结尾」等更相关结果，并自动滚到列表顶部；回车或点选跳转后，树会将目标节点滚到可视区域顶部。
+1. **Z 盘**：需已映射并可访问；收藏、添加项目、工作台工具扫描均依赖 Z 盘路径。
+2. **待办数据**：项目任务通过左侧试验右键「编辑项目任务」维护；个人任务在「个人待办」页直接添加。
+3. **粘贴截图**：在任务编辑对话框内任意位置 **Ctrl+V** 即可将剪贴板图片存为附件（企业微信/系统截图等）。
+4. **SAS EG**：建议安装 pywinauto；数据集多选后右键一次打开全部文件。
+5. **Word 转 PDF**：需本机 Word；大文件转换在后台线程，可取消。
+6. **单实例**：同一用户同时只能运行一个 PFN 进程。
+7. **崩溃排查**：查看 `%USERPROFILE%\PFN_Config\pfn_crash.log`。
 
 ---
 
 ## 更新日志
 
+### 2026-06
+
+- **我的待办**：项目待办按产品分组、折叠动画、产品拖拽排序；任务附件与编辑对话框（拖入 / Ctrl+V 粘贴截图）。
+- **项目节点**：关键时间节点月历视图，产品/年/月筛选，添加与编辑节点。
+- **工作台**：PDTManager、QCT_Tools、RTFtoPDF 三工具卡片，点击实时扫描最新 exe。
+- **崩溃日志**：启动时安装 `pfn_crash_log`，写入 `pfn_crash.log`。
+- **测试**：补充待办附件、拖拽、折叠、日期编辑等单元测试。
+
 ### 2026-05
 
-- **配置路径**：`config.json` 固定为 `%USERPROFILE%\PFN_Config\config.json`（按当前 Windows 用户），不再从 exe 旁或「上次目录」切换，避免升级/拷贝 exe 后误用空配置。旧数据在其它位置的需手动复制到 PFN_Config。
-- **右侧文件树 — 系统拖放**：支持将选中项拖出应用窗口至桌面、资源管理器或其它接受文件 URL 的目标；使用系统标准拖放语义（复制/移动由目标位置决定）。详见上文「### 3. 右侧文件树」中的「拖放到系统文件夹」。
-- **添加项目 — 搜索与定位**：产品搜索在排序上强化「文件夹名以关键词结尾」等优先级；刷新下拉后列表滚回顶部；从搜索跳转到树节点时使用 `PositionAtTop`，避免匹配项出现在视口最下方。详见上文「### 4. 添加项目」中的「产品搜索」。
+- **配置路径**：`config.json` 固定为 `%USERPROFILE%\PFN_Config\config.json`。
+- **文件树拖出**：支持拖出到桌面/资源管理器。
+- **添加项目搜索**：相关度排序与 `PositionAtTop` 定位优化。
 
 ---
 
 ## 许可证与维护
 
-本项目为内部临床试验项目导航与 SAS 集成工具。功能迭代与问题排查可参考代码注释及 `SAS_EG_集成与调试说明.md`。
+本项目为内部临床试验项目导航与 SAS 集成工具。功能迭代与问题排查可参考代码注释、`SAS_EG_集成与调试说明.md` 及 `%USERPROFILE%\PFN_Config\pfn_crash.log`。
