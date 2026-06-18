@@ -135,6 +135,13 @@ def _apply_wm_seticon(window: QWidget, icon_path: str) -> None:
 
 
 def main() -> None:
+    try:
+        from pfn_crash_log import install_pfn_crash_handlers
+
+        install_pfn_crash_handlers()
+    except Exception:
+        pass
+
     # Avoid console flicker when launched with python.exe (not used by frozen PFN.exe)
     if sys.platform == "win32" and os.environ.get("PFN_KEEP_CONSOLE") != "1":
         try:
