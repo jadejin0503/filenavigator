@@ -23,7 +23,7 @@ a = Analysis(
     datas=[
         ("assets/app_icon.ico", "assets"),
     ],
-    hiddenimports=["PyQt6.QtCore", "PyQt6.QtGui", "PyQt6.QtWidgets"],
+    hiddenimports=["PyQt6.QtCore", "PyQt6.QtGui", "PyQt6.QtWidgets", "pfn_crash_log"],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
